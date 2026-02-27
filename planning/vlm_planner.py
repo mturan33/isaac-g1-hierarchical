@@ -239,8 +239,9 @@ class SimplePlanner:
         ]
 
         if target_surface is not None:
+            # stop_distance for tables must be > half table width (0.4m) + clearance
             plan.append(
-                {"skill": "walk_to", "params": {"target": target_surface["id"], "stop_distance": 0.30}}
+                {"skill": "walk_to", "params": {"target": target_surface["id"], "stop_distance": 0.55}}
             )
             plan.append({"skill": "place", "params": {}})
         else:
@@ -265,7 +266,7 @@ class SimplePlanner:
         if target_surface is None:
             return []
         return [
-            {"skill": "walk_to", "params": {"target": target_surface["id"], "stop_distance": 0.30}},
+            {"skill": "walk_to", "params": {"target": target_surface["id"], "stop_distance": 0.55}},
             {"skill": "place", "params": {}},
         ]
 
