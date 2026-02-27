@@ -118,8 +118,9 @@ class WalkToSkill(BaseSkill):
             robot_pos_xy, robot_yaw, target
         )
 
-        # Check arrival
-        if (distance < self.cfg.position_threshold).all():
+        # Check arrival — use stop_distance if set, otherwise position_threshold
+        arrival_dist = self.cfg.stop_distance if self.cfg.stop_distance > 0 else self.cfg.position_threshold
+        if (distance < arrival_dist).all():
             # Stop the robot
             zero_cmd = torch.zeros_like(cmd_vel)
             return zero_cmd, True, self._make_success(

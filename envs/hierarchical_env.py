@@ -349,6 +349,22 @@ class HierarchicalSceneCfg(InteractiveSceneCfg):
         ),
     )
 
+    # -- Second table: 2m BEHIND robot spawn (for place target) --
+    table2: RigidObjectCfg = RigidObjectCfg(
+        prim_path="{ENV_REGEX_NS}/Table2",
+        spawn=sim_utils.CuboidCfg(
+            size=(0.8, 1.2, 0.75),
+            rigid_props=sim_utils.RigidBodyPropertiesCfg(kinematic_enabled=True),
+            collision_props=sim_utils.CollisionPropertiesCfg(),
+            visual_material=sim_utils.PreviewSurfaceCfg(
+                diffuse_color=(0.40, 0.28, 0.15),  # darker brown
+            ),
+        ),
+        init_state=RigidObjectCfg.InitialStateCfg(
+            pos=(-2.0, 0.0, 0.375),
+        ),
+    )
+
     # -- Dome light --
     light = AssetBaseCfg(
         prim_path="/World/skyLight",
@@ -413,6 +429,7 @@ class HierarchicalG1Env:
         # -- Get entity handles --
         self.robot: Articulation = self.scene["robot"]
         self.table: RigidObject = self.scene["table"]
+        self.table2: RigidObject = self.scene["table2"]
         self.cup: RigidObject = self.scene["cup"]
 
         # -- Load V6.2 locomotion policy --
@@ -643,6 +660,7 @@ class HierarchicalG1Env:
         indices = torch.arange(self.num_envs, device=self.device)
         self.robot.reset(indices)
         self.table.reset(indices)
+        self.table2.reset(indices)
         self.cup.reset(indices)
 
         # Write resets to sim and step once

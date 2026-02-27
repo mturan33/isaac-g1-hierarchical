@@ -14,6 +14,7 @@ class WalkToConfig:
     # Arrival threshold
     position_threshold: float = 0.3        # meters — stop when within this distance
     heading_threshold: float = 0.15        # radians — acceptable heading error
+    stop_distance: float = 0.0             # meters — stop THIS far from target (0=use position_threshold)
 
     # Velocity control
     max_forward_vel: float = 0.8           # m/s — maximum forward speed
