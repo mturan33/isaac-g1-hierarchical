@@ -145,7 +145,9 @@ class SkillExecutor:
         # Configure WalkTo skill with stop_distance
         walk_cfg = WalkToConfig()
         walk_cfg.stop_distance = stop_distance
-        walk_cfg.max_steps = 2000
+        walk_cfg.max_steps = 4000  # 80s at 50Hz — enough for 180-degree turns
+        walk_cfg.max_yaw_rate = 0.8  # rad/s — faster turning for large direction changes
+        walk_cfg.max_lateral_vel = 0.4  # m/s — faster lateral correction
 
         skill = WalkToSkill(config=walk_cfg, device=str(self.device))
         skill.reset(target_positions=target_xy)
@@ -194,7 +196,9 @@ class SkillExecutor:
 
         walk_cfg = WalkToConfig()
         walk_cfg.stop_distance = stop_distance
-        walk_cfg.max_steps = 2000
+        walk_cfg.max_steps = 4000
+        walk_cfg.max_yaw_rate = 0.8
+        walk_cfg.max_lateral_vel = 0.4
 
         skill = WalkToSkill(config=walk_cfg, device=str(self.device))
         skill.reset(target_positions=target_xy)

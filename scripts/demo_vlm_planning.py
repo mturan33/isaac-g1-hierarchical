@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-VLM Planning Demo — End-to-End Pick-and-Place
+VLM Planning Demo - End-to-End Pick-and-Place
 ================================================
 Demonstrates the full VLM planning pipeline:
     1. Create scene (robot + table + cup + table2)
@@ -28,7 +28,7 @@ import argparse
 
 from isaaclab.app import AppLauncher
 
-parser = argparse.ArgumentParser(description="VLM Planning Demo — Pick-and-Place")
+parser = argparse.ArgumentParser(description="VLM Planning Demo - Pick-and-Place")
 parser.add_argument("--num_envs", type=int, default=4, help="Number of environments")
 parser.add_argument(
     "--checkpoint", type=str, required=True,
@@ -96,7 +96,7 @@ def main():
     device = "cuda:0"
 
     print("=" * 60)
-    print("  VLM Planning Demo — Pick-and-Place")
+    print("  VLM Planning Demo - Pick-and-Place")
     print("=" * 60)
     print(f"  Task       : {args_cli.task}")
     print(f"  Planner    : {args_cli.planner}")
@@ -224,7 +224,7 @@ def main():
         status = r["result"]["status"]
         reason = r["result"].get("reason", "")
         symbol = "+" if status == "success" else "x"
-        print(f"    [{symbol}] {r['skill']}: {status} — {reason}")
+        print(f"    [{symbol}] {r['skill']}: {status} - {reason}")
 
     # Final robot state
     final_height = obs["base_height"].mean().item()
