@@ -1,11 +1,11 @@
-# Hierarchical LLM+RL Control for G1 Humanoid
+# Hierarchical VLM+RL Control for G1 Humanoid
 
-LLM task planner + RL skill primitives for the Unitree G1 (29 DoF) in Isaac Lab.
+VLM task planner + RL skill primitives for the Unitree G1 (29 DoF) in Isaac Lab.
 
 ## Architecture
 
 ```
-User Command (NL)  →  LLM Planner  →  Skill Executor  →  Loco Policy  →  G1 Robot
+User Command (NL)  →  VLM Planner  →  Skill Executor  →  Loco Policy  →  G1 Robot
                          ↑                                    ↑
                     Semantic Map                        unitree_rl_lab
                     (ground truth)                      (29 DoF velocity)
@@ -43,7 +43,7 @@ python scripts/test_skills.py --checkpoint <path_to_checkpoint>
 config/          Joint configs, skill parameters
 low_level/       Locomotion policy wrapper
 skills/          Skill primitives (walk_to, turn_to, stand_still, squat, grasp, place)
-planner/         LLM planner, semantic map, skill executor
+planner/         VLM planner, semantic map, skill executor
 envs/            Isaac Lab environments
 scripts/         Training, testing, demo scripts
 ```
@@ -61,6 +61,6 @@ scripts/         Training, testing, demo scripts
 
 ## References
 
-- SayCan (Ahn et al. 2022) - LLM + affordance scoring
-- Berkeley Loco-Manipulation (Ouyang et al. 2024) - Skill chaining + LLM cascade
+- SayCan (Ahn et al. 2022) - VLM + affordance scoring
+- Berkeley Loco-Manipulation (Ouyang et al. 2024) - Skill chaining + VLM cascade
 - unitree_rl_lab - G1 29-DoF locomotion training
