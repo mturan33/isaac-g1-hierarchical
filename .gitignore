@@ -180,3 +180,4 @@ cython_debug/
 .cursorignore
 .cursorindexingignore
 /.claude
+/perception/perception-module-python
