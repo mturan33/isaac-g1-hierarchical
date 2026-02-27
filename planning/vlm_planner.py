@@ -224,7 +224,7 @@ class SimplePlanner:
             return []
 
     def _plan_pick_and_place(self, task: str, objects: list, surfaces: list) -> list:
-        """Standard pick-and-place: walk → reach → grasp → walk → place."""
+        """Standard pick-and-place: walk -> reach -> grasp -> walk -> place."""
         target_obj = self._find_target_object(task, objects)
         target_surface = self._find_target_surface(task, surfaces)
 
@@ -249,7 +249,7 @@ class SimplePlanner:
         return plan
 
     def _plan_pick(self, task: str, objects: list) -> list:
-        """Pick only: walk → reach → grasp."""
+        """Pick only: walk -> reach -> grasp."""
         target_obj = self._find_target_object(task, objects)
         if target_obj is None:
             return []
@@ -260,7 +260,7 @@ class SimplePlanner:
         ]
 
     def _plan_place(self, task: str, surfaces: list) -> list:
-        """Place only (assumes already holding): walk → place."""
+        """Place only (assumes already holding): walk -> place."""
         target_surface = self._find_target_surface(task, surfaces)
         if target_surface is None:
             return []

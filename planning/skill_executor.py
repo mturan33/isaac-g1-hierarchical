@@ -5,7 +5,7 @@ Executes a plan (list of skill steps) sequentially on the HierarchicalG1Env.
 
 Reuses the exact control patterns from test_hierarchical.py:
     - walk_to: WalkToSkill with stop_distance, then 50-step stabilize
-    - reach: manipulation mode → Stage 7 arm policy → 80-step active reach + hold
+    - reach: manipulation mode -> Stage 7 arm policy -> 80-step active reach + hold
     - grasp: finger_controller.close("both"), 100-step hold
     - place: finger_controller.open("both"), arm back to default, 200 steps
 """
@@ -98,7 +98,7 @@ class SkillExecutor:
                 result = handler(**params)
 
             results.append({"skill": skill_name, "params": params, "result": result})
-            print(f"  → {skill_name}: {result['status']} ({result.get('reason', '')})")
+            print(f"  -> {skill_name}: {result['status']} ({result.get('reason', '')})")
 
             if result["status"] == "failed":
                 print(f"\n  [Executor] PLAN FAILED at step {i+1}")
@@ -124,16 +124,20 @@ class SkillExecutor:
         from ..skills.walk_to import WalkToSkill
         from ..config.skill_config import WalkToConfig
 
-        # Get target position from semantic map
-        target_pos = self.semantic_map.get_position(target)
-        if target_pos is None:
-            return {"status": "failed", "reason": f"Target '{target}' not found in semantic map"}
-
-        target_xy = torch.tensor(
-            [[target_pos[0], target_pos[1]]],
-            dtype=torch.float32,
-            device=self.device,
-        ).expand(self.env.num_envs, -1)
+        # Get per-env target positions (each env has objects at different world positions)
+        per_env_pos = self.semantic_map.get_per_env_position(target)
+        if per_env_pos is not None:
+            target_xy = per_env_pos[:, :2]  # [num_envs, 2]
+        else:
+            # Fallback: single position expanded to all envs
+            target_pos = self.semantic_map.get_position(target)
+            if target_pos is None:
+                return {"status": "failed", "reason": f"Target '{target}' not found in semantic map"}
+            target_xy = torch.tensor(
+                [[target_pos[0], target_pos[1]]],
+                dtype=torch.float32,
+                device=self.device,
+            ).expand(self.env.num_envs, -1)
 
         # Ensure walking mode
         self.env.set_manipulation_mode(False)
@@ -237,19 +241,22 @@ class SkillExecutor:
         env.set_manipulation_mode(True)
         env.enable_arm_policy(True)
 
-        # Get target position (refresh from semantic map)
+        # Get per-env target position (refresh from semantic map)
         self.semantic_map.update()
-        target_pos = self.semantic_map.get_object_position(target)
-        if target_pos is None:
-            return {"status": "failed", "reason": f"Target '{target}' not found"}
+        per_env_pos = self.semantic_map.get_per_env_position(target)
+        if per_env_pos is not None:
+            cup_pos_all = per_env_pos  # [num_envs, 3]
+        else:
+            target_pos = self.semantic_map.get_object_position(target)
+            if target_pos is None:
+                return {"status": "failed", "reason": f"Target '{target}' not found"}
+            cup_pos_all = torch.tensor(
+                [target_pos], dtype=torch.float32, device=self.device,
+            ).expand(env.num_envs, -1)
 
         # Compute reachable target within arm workspace
         # (exact pattern from test_hierarchical.py lines 226-251)
         shoulder_offset = torch.tensor(self.SHOULDER_OFFSET, device=self.device)
-
-        cup_pos_all = torch.tensor(
-            [target_pos], dtype=torch.float32, device=self.device,
-        ).expand(env.num_envs, -1)
 
         root_pos = env.robot.data.root_pos_w
         root_quat = env.robot.data.root_quat_w
@@ -305,7 +312,7 @@ class SkillExecutor:
         ee_world, _ = env._compute_palm_ee()
         final_ee_dist = (ee_world - env._arm_target_world).norm(dim=-1).mean().item()
         cup_dist = (ee_world - cup_pos_all).norm(dim=-1).mean().item()
-        print(f"  [Reach] Final EE→target: {final_ee_dist:.3f}m, EE→cup: {cup_dist:.3f}m")
+        print(f"  [Reach] Final EE->target: {final_ee_dist:.3f}m, EE->cup: {cup_dist:.3f}m")
 
         return {
             "status": "success",

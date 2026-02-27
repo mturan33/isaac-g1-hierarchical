@@ -229,3 +229,50 @@ class SemanticMap:
         if pos is not None:
             return pos
         return self.get_surface_position(target_id)
+
+    def get_per_env_position(self, target_id: str) -> Optional[torch.Tensor]:
+        """Get per-env world position tensor [num_envs, 3] from sim.
+
+        In multi-env setups, each env has its own copy of objects at different
+        world positions (due to env_spacing). This returns ALL envs' positions.
+
+        Args:
+            target_id: Object or surface identifier
+
+        Returns:
+            [num_envs, 3] tensor or None if target not found
+        """
+        if self.mode != "ground_truth" or self.env is None:
+            return None
+
+        # Map target_id to sim entity
+        entity = self._resolve_entity(target_id)
+        if entity is not None:
+            return entity.data.root_pos_w.clone()  # [num_envs, 3]
+        return None
+
+    def _resolve_entity(self, target_id: str):
+        """Resolve target_id to an Isaac Lab entity (RigidObject)."""
+        env = self.env
+
+        # Direct ID match
+        id_map = {
+            "cup_01": env.cup,
+            "table_01": env.table,
+            "table_02": env.table2,
+        }
+        if target_id in id_map:
+            return id_map[target_id]
+
+        # Class-based matching
+        class_map = {
+            "cup": env.cup,
+            "table": env.table,
+        }
+        for class_name, entity in class_map.items():
+            if class_name in target_id:
+                # Check if it's the second table
+                if "02" in target_id or "second" in target_id or "2" in target_id:
+                    return env.table2
+                return entity
+        return None

@@ -89,7 +89,8 @@ class WalkToSkill(BaseSkill):
         # Check timeout
         timeout = self._check_timeout()
         if timeout is not None:
-            zero_cmd = torch.zeros(1, 3, device=self.device)
+            num_envs = obs_dict["root_pos"].shape[0]
+            zero_cmd = torch.zeros(num_envs, 3, device=self.device)
             return zero_cmd, True, timeout
 
         # Extract robot state
