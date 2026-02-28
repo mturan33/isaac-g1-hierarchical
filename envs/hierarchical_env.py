@@ -314,26 +314,21 @@ class HierarchicalSceneCfg(InteractiveSceneCfg):
         },
     )
 
-    # -- Table: 3.5 m ahead of robot spawn --
-    # Narrow table (0.5m depth) so robot can get closer to cup
-    # Front edge at x=3.25 (center 3.5, half-width 0.25)
+    # -- Table 1: Realistic PackingTable, 3.5m ahead of robot spawn --
+    # PackingTable USD: surface at ~z=0.82 when spawned at z=-0.2
     table: RigidObjectCfg = RigidObjectCfg(
         prim_path="{ENV_REGEX_NS}/Table",
-        spawn=sim_utils.CuboidCfg(
-            size=(0.5, 1.2, 0.75),
+        spawn=sim_utils.UsdFileCfg(
+            usd_path="C:/IsaacLab/source/isaaclab_tasks/isaaclab_tasks/direct/unitree_sim_isaaclab/assets/objects/PackingTable/PackingTable.usd",
             rigid_props=sim_utils.RigidBodyPropertiesCfg(kinematic_enabled=True),
-            collision_props=sim_utils.CollisionPropertiesCfg(),
-            visual_material=sim_utils.PreviewSurfaceCfg(
-                diffuse_color=(0.55, 0.35, 0.18),
-            ),
         ),
         init_state=RigidObjectCfg.InitialStateCfg(
-            pos=(3.5, 0.0, 0.375),
+            pos=(3.5, 0.0, -0.2),
         ),
     )
 
-    # -- Red cup near the FRONT of the table --
-    # Cup at x=3.28 — just 3cm from front edge (3.25), easy to reach
+    # -- Red cup on table 1 --
+    # Cup center at z=0.87 (table surface ~0.82 + half cup height 0.05)
     cup: RigidObjectCfg = RigidObjectCfg(
         prim_path="{ENV_REGEX_NS}/Cup",
         spawn=sim_utils.CylinderCfg(
@@ -347,23 +342,21 @@ class HierarchicalSceneCfg(InteractiveSceneCfg):
             ),
         ),
         init_state=RigidObjectCfg.InitialStateCfg(
-            pos=(3.28, 0.0, 0.80),
+            pos=(3.28, 0.0, 0.87),
         ),
     )
 
-    # -- Second table: 2m BEHIND robot spawn (for place target) --
+    # -- Table 2: Table with yellow box (kasa), 2m behind robot --
+    # table_with_yellowbox USD: has built-in yellow box for placing objects
+    # Surface at ~z=0.82 when spawned at z=-0.2
     table2: RigidObjectCfg = RigidObjectCfg(
         prim_path="{ENV_REGEX_NS}/Table2",
-        spawn=sim_utils.CuboidCfg(
-            size=(0.8, 1.2, 0.75),
+        spawn=sim_utils.UsdFileCfg(
+            usd_path="C:/IsaacLab/source/isaaclab_tasks/isaaclab_tasks/direct/unitree_sim_isaaclab/assets/objects/table_with_yellowbox.usd",
             rigid_props=sim_utils.RigidBodyPropertiesCfg(kinematic_enabled=True),
-            collision_props=sim_utils.CollisionPropertiesCfg(),
-            visual_material=sim_utils.PreviewSurfaceCfg(
-                diffuse_color=(0.40, 0.28, 0.15),  # darker brown
-            ),
         ),
         init_state=RigidObjectCfg.InitialStateCfg(
-            pos=(-2.0, 0.0, 0.375),
+            pos=(-2.0, 0.0, -0.2),
         ),
     )
 
@@ -425,7 +418,7 @@ class HierarchicalG1Env:
 
         # -- Create scene --
         scene_cfg.num_envs = num_envs
-        scene_cfg.env_spacing = 5.0
+        scene_cfg.env_spacing = 6.0
         self.scene = InteractiveScene(scene_cfg)
 
         # -- Get entity handles --

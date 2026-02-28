@@ -382,9 +382,9 @@ class SkillExecutor:
                       f"Cup=[{live_cup_pos[0,0]:.2f},{live_cup_pos[0,1]:.2f},{live_cup_pos[0,2]:.2f}]")
 
             # Try magnetic attach as soon as EE is close enough
-            # 0.25m trigger: attach early before arm oscillation knocks the cup
-            if not attached_during_reach and cup_dist < 0.25:
-                attached_during_reach = env.attach_object_to_hand(max_dist=0.30)
+            # 0.15m trigger: cup attaches when hand is very close
+            if not attached_during_reach and cup_dist < 0.15:
+                attached_during_reach = env.attach_object_to_hand(max_dist=0.20)
                 if attached_during_reach:
                     print(f"  [Reach] ** Magnetic attach at step {step}! **")
                     break

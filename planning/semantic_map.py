@@ -85,24 +85,25 @@ class SemanticMap:
             "confidence": 1.0,
         }
 
-        # Table 1 (front)
+        # Table 1 (front) - PackingTable USD, surface ~0.82m
         table_pos = env.table.data.root_pos_w[0].cpu().tolist()
         self.surfaces["table_01"] = {
             "id": "table_01",
             "class": "table",
             "position_3d": table_pos,
             "placeable": True,
-            "size": [0.5, 1.2, 0.75],
+            "size": [0.8, 0.8, 0.82],  # PackingTable USD approximate dims
         }
 
-        # Table 2 (behind robot)
+        # Table 2 (behind robot) - table_with_yellowbox USD, has built-in kasa
         table2_pos = env.table2.data.root_pos_w[0].cpu().tolist()
         self.surfaces["table_02"] = {
             "id": "table_02",
             "class": "table",
             "position_3d": table2_pos,
             "placeable": True,
-            "size": [0.8, 1.2, 0.75],  # table2 keeps original size
+            "size": [0.8, 0.8, 0.82],  # table_with_yellowbox USD approximate dims
+            "has_container": True,  # yellow box (kasa) on this table
         }
 
     # ------------------------------------------------------------------
