@@ -31,7 +31,7 @@ class SkillExecutor:
 
     # Right shoulder offset in body frame (from arm_policy_wrapper.py)
     SHOULDER_OFFSET = [0.0, -0.174, 0.259]
-    MAX_REACH = 0.40  # Conservative for Stage 7 (trained at 0.32m), safe OOD extension
+    MAX_REACH = 0.35  # Conservative for Stage 7 (trained at 0.32m), safe OOD extension
 
     def __init__(
         self,
@@ -299,7 +299,7 @@ class SkillExecutor:
         dist_from_shoulder = cup_from_shoulder.norm(dim=-1, keepdim=True)
         print(f"  [Reach] Target distance from shoulder: {dist_from_shoulder.mean():.3f}m (max: {self.MAX_REACH}m)")
 
-        # Clamp to MAX_REACH (now 0.45m — generous enough for most cup positions)
+        # Clamp to MAX_REACH
         scale = torch.clamp(self.MAX_REACH / (dist_from_shoulder + 1e-6), max=1.0)
         reachable_target_body = shoulder_offset.unsqueeze(0) + cup_from_shoulder * scale
 
@@ -323,6 +323,7 @@ class SkillExecutor:
         reach_steps = 120
         best_cup_dist = float('inf')
         best_ee_dist = float('inf')
+        attached_during_reach = False
 
         for step in range(reach_steps):
             if not self._is_running():
@@ -332,10 +333,11 @@ class SkillExecutor:
             cmd = lean_cmd if step < 80 else self._stand_cmd
             obs = env.step_arm_policy(cmd)
 
-            # Track distances
+            # Track distances using LIVE cup position (may have been knocked)
             ee_world, _ = env._compute_palm_ee()
+            live_cup_pos = env.cup.data.root_pos_w
             ee_dist = (ee_world - env._arm_target_world).norm(dim=-1).mean().item()
-            cup_dist = (ee_world - cup_pos_all).norm(dim=-1).mean().item()
+            cup_dist = (ee_world - live_cup_pos).norm(dim=-1).mean().item()
             best_ee_dist = min(best_ee_dist, ee_dist)
             best_cup_dist = min(best_cup_dist, cup_dist)
 
@@ -345,6 +347,14 @@ class SkillExecutor:
                 print(f"  [Reach] Step {step:4d} | Height: {h:.2f}m | "
                       f"Standing: {standing}/{env.num_envs} | "
                       f"EE->target: {ee_dist:.3f}m | EE->cup: {cup_dist:.3f}m")
+
+            # Try magnetic attach as soon as EE is close enough
+            # This prevents the oscillation from knocking the cup away
+            if not attached_during_reach and cup_dist < 0.20:
+                attached_during_reach = env.attach_object_to_hand(max_dist=0.25)
+                if attached_during_reach:
+                    print(f"  [Reach] Magnetic attach during reach at step {step}!")
+                    break
 
             # Early success: EE is very close to actual cup
             if cup_dist < 0.06:
@@ -376,6 +386,7 @@ class SkillExecutor:
             "best_cup_dist": best_cup_dist,
             "final_ee_dist": final_ee_dist,
             "cup_dist": cup_dist,
+            "attached": attached_during_reach,
         }
 
     # ------------------------------------------------------------------
@@ -386,6 +397,7 @@ class SkillExecutor:
 
         1. Close fingers (visual)
         2. Try magnetic attach (snap cup to palm if close enough)
+           - Skipped if already attached during reach phase
         3. Hold for 50 steps to stabilize
         """
         env = self.env
@@ -395,14 +407,22 @@ class SkillExecutor:
         if arm_targets is None:
             arm_targets = env.robot.data.joint_pos[:, env._arm_idx].clone()
 
-        # Close fingers for 30 steps first
+        # Check if already attached during reach
+        already_attached = getattr(env, '_object_attached', False)
+        if already_attached:
+            print("  [Grasp] Cup already attached from reach phase")
+
+        # Close fingers for 30 steps
         for step in range(30):
             if not self._is_running():
                 break
             obs = env.step_manipulation(self._stand_cmd, arm_targets)
 
-        # Magnetic attach: snap cup to palm
-        attached = env.attach_object_to_hand(max_dist=0.25)
+        # Magnetic attach: snap cup to palm (skip if already attached)
+        if not already_attached:
+            attached = env.attach_object_to_hand(max_dist=0.25)
+        else:
+            attached = True
 
         # Hold for 50 more steps
         for step in range(50):
