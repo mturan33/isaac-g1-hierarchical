@@ -233,7 +233,9 @@ class SimplePlanner:
             return []
 
         plan = [
-            {"skill": "walk_to", "params": {"target": target_obj["id"], "stop_distance": 0.25}},
+            # stop_distance 0.30m: robot body collides with table at ~0.27m from cup
+            # arm policy can still reach (0.32m workspace from shoulder)
+            {"skill": "walk_to", "params": {"target": target_obj["id"], "stop_distance": 0.30}},
             {"skill": "reach", "params": {"target": target_obj["id"]}},
             {"skill": "grasp", "params": {}},
         ]
@@ -255,7 +257,7 @@ class SimplePlanner:
         if target_obj is None:
             return []
         return [
-            {"skill": "walk_to", "params": {"target": target_obj["id"], "stop_distance": 0.25}},
+            {"skill": "walk_to", "params": {"target": target_obj["id"], "stop_distance": 0.30}},
             {"skill": "reach", "params": {"target": target_obj["id"]}},
             {"skill": "grasp", "params": {}},
         ]
