@@ -217,14 +217,13 @@ def main():
         env.enable_arm_policy(True)
 
         # Compute a REACHABLE target within the arm's workspace.
-        # Stage 7 was trained on targets within 0.18-0.35m of the shoulder.
-        # The cup at 3.5m is ~0.5-0.7m from the EE -- too far!
-        # Strategy: compute target in body frame clamped to reachable distance,
-        # in the direction of the cup from the right shoulder.
+        # Stage 7 was trained on targets within 0.18-0.35m of the shoulder,
+        # but the arm CAN physically extend further (up to ~0.50m).
+        # We use MAX_REACH=0.45m to allow nearly full extension.
         #
         # Right shoulder offset in body frame (from arm_policy_wrapper.py)
         shoulder_offset = torch.tensor([0.0, -0.174, 0.259], device=device)
-        max_reach = 0.32  # within Stage 7 training workspace
+        max_reach = 0.45  # generous limit — arm can extend beyond training range
 
         # Get each env's cup position and robot state
         cup_pos_all = env.cup.data.root_pos_w.clone()  # [N, 3]
@@ -243,27 +242,37 @@ def main():
         # Clamp to reachable workspace -- target on line from shoulder to cup
         scale = torch.clamp(max_reach / (dist_from_shoulder + 1e-6), max=1.0)
         reachable_target_body = shoulder_offset.unsqueeze(0) + cup_from_shoulder * scale
+        clamped = dist_from_shoulder.mean() > max_reach
         print(f"  Reachable target (body env0): [{reachable_target_body[0, 0]:.3f}, "
-              f"{reachable_target_body[0, 1]:.3f}, {reachable_target_body[0, 2]:.3f}]")
+              f"{reachable_target_body[0, 1]:.3f}, {reachable_target_body[0, 2]:.3f}]"
+              f" {'(clamped)' if clamped else '(actual cup)'}")
 
         # Convert reachable target to world frame for set_arm_target_world
         reachable_target_world = quat_apply(root_quat, reachable_target_body) + root_pos
         env.set_arm_target_world(reachable_target_world)
         env.reset_arm_policy_state()
 
-        # Phase 3a: Active reaching (limited steps to prevent OOD divergence)
-        reach_steps = 80
+        # Slow forward lean to close remaining distance
+        lean_cmd = torch.zeros(num_envs, 3, device=device)
+        lean_cmd[:, 0] = 0.15  # 0.15 m/s forward lean
+
+        # Phase 3a: Active reaching (120 steps, with forward lean for first 80)
+        reach_steps = 120
         best_ee_dist = float('inf')
+        best_cup_dist = float('inf')
         for step in range(reach_steps):
             if not simulation_app.is_running():
                 break
 
-            obs = env.step_arm_policy(stand_cmd)
+            cmd = lean_cmd if step < 80 else stand_cmd
+            obs = env.step_arm_policy(cmd)
 
             # Track best distance
             ee_world, _ = env._compute_palm_ee()
             ee_dist = (ee_world - env._arm_target_world).norm(dim=-1).mean().item()
+            cup_dist = (ee_world - cup_pos_all).norm(dim=-1).mean().item()
             best_ee_dist = min(best_ee_dist, ee_dist)
+            best_cup_dist = min(best_cup_dist, cup_dist)
 
             if step % 20 == 0:
                 h = obs["base_height"].mean().item()
@@ -271,18 +280,23 @@ def main():
                 arm_pos = env.robot.data.joint_pos[:, env._arm_policy_joint_idx]
                 print(f"  [Reach] Step {step:4d} | Height: {h:.2f}m | "
                       f"Standing: {standing}/{num_envs} | "
-                      f"EE dist: {ee_dist:.3f}m | "
+                      f"EE->target: {ee_dist:.3f}m | EE->cup: {cup_dist:.3f}m | "
                       f"arm[0]: [{arm_pos[0, 0]:.2f}, {arm_pos[0, 1]:.2f}, "
                       f"{arm_pos[0, 2]:.2f}, {arm_pos[0, 3]:.2f}, {arm_pos[0, 4]:.2f}]")
 
-        print(f"  [Reach] Best EE dist during reach: {best_ee_dist:.3f}m")
+            # Early success
+            if cup_dist < 0.06:
+                print(f"  [Reach] Early success! EE->cup: {cup_dist:.3f}m")
+                break
+
+        print(f"  [Reach] Best EE->target: {best_ee_dist:.3f}m, Best EE->cup: {best_cup_dist:.3f}m")
 
         # Phase 3b: Hold position (freeze arm at current position, continue loco)
         print(f"  [Reach] Holding arm position...")
         env.enable_arm_policy(False)  # Switch to heuristic but keep current pose
         # Capture current arm positions as hold targets
         hold_arm_targets = env.robot.data.joint_pos[:, env._arm_idx].clone()
-        for step in range(100):
+        for step in range(80):
             if not simulation_app.is_running():
                 break
             obs = env.step_manipulation(stand_cmd, hold_arm_targets)
@@ -291,8 +305,8 @@ def main():
         ee_world, _ = env._compute_palm_ee()
         final_ee_dist = (ee_world - env._arm_target_world).norm(dim=-1).mean().item()
         cup_dist = (ee_world - cup_pos_all).norm(dim=-1).mean().item()
-        print(f"  [Reach] Final EE dist to target: {final_ee_dist:.3f}m (best: {best_ee_dist:.3f}m)")
-        print(f"  [Reach] Final EE dist to cup: {cup_dist:.3f}m")
+        print(f"  [Reach] Final EE->target: {final_ee_dist:.3f}m (best: {best_ee_dist:.3f}m)")
+        print(f"  [Reach] Final EE->cup: {cup_dist:.3f}m (best: {best_cup_dist:.3f}m)")
     else:
         # --- HEURISTIC MODE ---
         print(f"\n{'-'*50}")
