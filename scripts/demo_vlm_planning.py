@@ -1,12 +1,15 @@
 #!/usr/bin/env python3
 """
-VLM Planning Demo - End-to-End Pick-and-Place
-================================================
+VLM Planning Demo - Pick-and-Place (Locomanipulation G1 Style)
+================================================================
 Demonstrates the full VLM planning pipeline:
-    1. Create scene (robot + table + cup + table2)
+    1. Create scene (robot + PackingTable + steering wheel)
     2. SemanticMap reads object positions (ground truth)
     3. Planner generates skill sequence from natural language task
     4. SkillExecutor runs the plan on the environment
+
+Scene matches PickPlace-Locomanipulation-G1-Abs-v0:
+    PackingTable with built-in basket, steering wheel on surface.
 
 Planners:
     --planner simple : Rule-based (no VLM needed, for testing)
@@ -17,7 +20,7 @@ Usage (from C:\\IsaacLab):
         --num_envs 4 ^
         --checkpoint C:\\IsaacLab\\logs\\ulc\\g1_unified_stage1_2026-02-27_00-05-20\\model_best.pt ^
         --arm_checkpoint C:\\IsaacLab\\logs\\ulc\\ulc_g1_stage7_antigaming_2026-02-06_17-41-47\\model_best.pt ^
-        --task "Pick up the red cup and place it on the second table" ^
+        --task "Pick up the steering wheel from the table" ^
         --planner simple
 """
 
@@ -40,7 +43,7 @@ parser.add_argument(
 )
 parser.add_argument(
     "--task", type=str,
-    default="Pick up the red cup and place it on the second table",
+    default="Pick up the steering wheel from the table",
     help="Natural language task description",
 )
 parser.add_argument(

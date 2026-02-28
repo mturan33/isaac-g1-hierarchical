@@ -11,10 +11,10 @@ Key change from previous version:
   - Fingers controlled by FingerController (14 joints)
   - No more "overriding" — loco never touches arms!
 
-Scene:
+Scene (matching PickPlace-Locomanipulation-G1 env):
   - G1 robot with DEX3 hands on flat terrain
-  - Table (kinematic rigid body, 3.5m ahead)
-  - Cup on the table (dynamic rigid body)
+  - PackingTable (kinematic, 3m ahead) with built-in basket
+  - Steering wheel on the table (dynamic rigid body)
   - Dome light
 
 Control pipeline (walking mode):
@@ -51,7 +51,7 @@ from isaaclab.actuators import ImplicitActuatorCfg
 from isaaclab.scene import InteractiveScene, InteractiveSceneCfg
 from isaaclab.terrains import TerrainImporterCfg
 from isaaclab.utils import configclass
-from isaaclab.utils.assets import ISAAC_NUCLEUS_DIR
+from isaaclab.utils.assets import ISAAC_NUCLEUS_DIR, ISAACLAB_NUCLEUS_DIR
 from isaaclab.utils.math import quat_apply_inverse
 from isaaclab.markers import VisualizationMarkers, VisualizationMarkersCfg
 
@@ -154,7 +154,8 @@ def quat_to_euler_xyz_wxyz(quat: torch.Tensor) -> torch.Tensor:
 
 @configclass
 class HierarchicalSceneCfg(InteractiveSceneCfg):
-    """Scene: flat ground + G1-DEX3 robot + table + cup + light.
+    """Scene: flat ground + G1-DEX3 robot + PackingTable + steering wheel + light.
+    Matches PickPlace-Locomanipulation-G1 env layout.
     Robot actuator parameters match V6.2 training config EXACTLY."""
 
     # -- Terrain --
@@ -314,8 +315,9 @@ class HierarchicalSceneCfg(InteractiveSceneCfg):
         },
     )
 
-    # -- Table 1: Realistic PackingTable, 3.5m ahead of robot spawn --
-    # PackingTable USD: surface at ~z=0.82 when spawned at z=-0.2
+    # -- PackingTable: 3m ahead, matching PickPlace-Locomanipulation-G1 env --
+    # PackingTable USD: surface ~z=0.70 when spawned at z=-0.3, has built-in basket
+    # No rotation (matching reference env layout)
     table: RigidObjectCfg = RigidObjectCfg(
         prim_path="{ENV_REGEX_NS}/Table",
         spawn=sim_utils.UsdFileCfg(
@@ -323,44 +325,23 @@ class HierarchicalSceneCfg(InteractiveSceneCfg):
             rigid_props=sim_utils.RigidBodyPropertiesCfg(kinematic_enabled=True),
         ),
         init_state=RigidObjectCfg.InitialStateCfg(
-            pos=(3.5, 0.0, -0.2),
-            rot=(0.7071, 0.0, 0.0, 0.7071),  # 90 deg around Z
+            pos=(3.0, 0.0, -0.3),
         ),
     )
 
-    # -- Red cup on table 1 --
-    # Cup center at z=0.87 (table surface ~0.82 + half cup height 0.05)
-    cup: RigidObjectCfg = RigidObjectCfg(
-        prim_path="{ENV_REGEX_NS}/Cup",
-        spawn=sim_utils.CylinderCfg(
-            radius=0.035,
-            height=0.10,
+    # -- Steering wheel on table (matching PickPlace-Locomanipulation-G1 env) --
+    # Position: near front edge of table, within robot's approach path
+    # Reference: table at (0,0.55,-0.3), object at (-0.35,0.45,0.70)
+    # Our table at (3.0,0,-0.3), object offset (-0.35,-0.10,+1.0) from table
+    pickup_object: RigidObjectCfg = RigidObjectCfg(
+        prim_path="{ENV_REGEX_NS}/Object",
+        spawn=sim_utils.UsdFileCfg(
+            usd_path=f"{ISAACLAB_NUCLEUS_DIR}/Mimic/pick_place_task/pick_place_assets/steering_wheel.usd",
+            scale=(0.75, 0.75, 0.75),
             rigid_props=sim_utils.RigidBodyPropertiesCfg(),
-            mass_props=sim_utils.MassPropertiesCfg(mass=0.3),
-            collision_props=sim_utils.CollisionPropertiesCfg(),
-            visual_material=sim_utils.PreviewSurfaceCfg(
-                diffuse_color=(0.85, 0.12, 0.12),
-            ),
         ),
         init_state=RigidObjectCfg.InitialStateCfg(
-            pos=(3.28, 0.0, 0.87),
-        ),
-    )
-
-    # -- Table 2: Table with yellow box (kasa), 2m behind robot --
-    # table_with_yellowbox USD: has built-in yellow box for placing objects
-    # Surface at ~z=0.82 when spawned at z=-0.2
-    # NOTE: Uses AssetBaseCfg (not RigidObjectCfg) because the USD has
-    # instanced prims that prevent RigidBodyAPI from being applied.
-    # Position is tracked via StaticObjectProxy in the env.
-    table2 = AssetBaseCfg(
-        prim_path="{ENV_REGEX_NS}/Table2",
-        spawn=sim_utils.UsdFileCfg(
-            usd_path="C:/IsaacLab/source/isaaclab_tasks/isaaclab_tasks/direct/unitree_sim_isaaclab/assets/objects/table_with_yellowbox.usd",
-        ),
-        init_state=AssetBaseCfg.InitialStateCfg(
-            pos=(-2.0, 0.0, -0.2),
-            rot=(0.7071, 0.0, 0.0, 0.7071),  # 90 deg around Z
+            pos=(2.65, -0.10, 0.70),
         ),
     )
 
@@ -372,35 +353,6 @@ class HierarchicalSceneCfg(InteractiveSceneCfg):
             texture_file=f"{ISAAC_NUCLEUS_DIR}/Materials/Textures/Skies/PolyHaven/kloofendal_43d_clear_puresky_4k.hdr",
         ),
     )
-
-
-# =============================================================================
-# Static object proxy (for USD assets without RigidBodyAPI)
-# =============================================================================
-
-class StaticObjectProxy:
-    """Lightweight proxy that mimics RigidObject.data.root_pos_w for static objects.
-
-    Used for USD assets (like table_with_yellowbox) that have instanced prims
-    and cannot use RigidObjectCfg. Since the object is static, we compute
-    per-env positions from scene env_origins + init_state.
-
-    Attributes:
-        data: Namespace with root_pos_w [num_envs, 3] tensor.
-    """
-
-    class _Data:
-        def __init__(self, positions: torch.Tensor):
-            self.root_pos_w = positions
-
-    def __init__(self, init_pos: tuple, env_origins: torch.Tensor, device: str):
-        pos = torch.tensor(init_pos, dtype=torch.float32, device=device)
-        world_pos = env_origins + pos.unsqueeze(0)
-        self.data = self._Data(world_pos)
-
-    def reset(self, indices):
-        """No-op: static objects don't need reset."""
-        pass
 
 
 # =============================================================================
@@ -451,19 +403,13 @@ class HierarchicalG1Env:
 
         # -- Create scene --
         scene_cfg.num_envs = num_envs
-        scene_cfg.env_spacing = 6.0
+        scene_cfg.env_spacing = 8.0
         self.scene = InteractiveScene(scene_cfg)
 
         # -- Get entity handles --
         self.robot: Articulation = self.scene["robot"]
         self.table: RigidObject = self.scene["table"]
-        self.cup: RigidObject = self.scene["cup"]
-        # table2 uses AssetBaseCfg (no RigidBodyAPI) — proxy provides .data.root_pos_w
-        self.table2 = StaticObjectProxy(
-            init_pos=(-2.0, 0.0, -0.2),
-            env_origins=self.scene.env_origins,
-            device=device,
-        )
+        self.pickup_obj: RigidObject = self.scene["pickup_object"]
 
         # -- Load V6.2 locomotion policy --
         from ..low_level.policy_wrapper import LocomotionPolicy
@@ -552,7 +498,7 @@ class HierarchicalG1Env:
         self._right_finger_lower: Optional[torch.Tensor] = None
         self._right_finger_upper: Optional[torch.Tensor] = None
 
-        # -- Magnetic grasp: snap cup to palm when close enough --
+        # -- Magnetic grasp: snap object to palm when close enough --
         self._object_attached = False
         self._attach_offset_body = torch.zeros(num_envs, 3, device=device)  # offset in palm frame
 
@@ -702,9 +648,8 @@ class HierarchicalG1Env:
         indices = torch.arange(self.num_envs, device=self.device)
         self.robot.reset(indices)
         self.table.reset(indices)
-        self.table2.reset(indices)
-        self.cup.reset(indices)
-        self._object_attached = False  # release cup on reset
+        self.pickup_obj.reset(indices)
+        self._object_attached = False  # release object on reset
 
         # Write resets to sim and step once
         self.scene.write_data_to_sim()
@@ -995,42 +940,41 @@ class HierarchicalG1Env:
         return ee_pos, palm_quat
 
     # ================================================================== #
-    #  Magnetic Grasp: attach/detach cup to/from palm
+    #  Magnetic Grasp: attach/detach object to/from palm
     # ================================================================== #
 
     def attach_object_to_hand(self, max_dist: float = 0.20) -> bool:
-        """Attach the cup to the palm if EE is within max_dist.
+        """Attach the pickup object to the palm if EE is within max_dist.
 
-        Computes offset from palm to cup center in palm local frame,
-        then each subsequent sim step teleports the cup to follow the palm.
-        No snap: cup stays at its actual distance from palm.
+        Computes offset from palm to object center in palm local frame,
+        then each subsequent sim step teleports the object to follow the palm.
 
         Args:
-            max_dist: Max EE-cup distance to trigger attach.
+            max_dist: Max EE-object distance to trigger attach.
 
         Returns True if attached, False if too far.
         """
         ee_world, palm_quat = self._compute_palm_ee()
-        cup_pos = self.cup.data.root_pos_w
-        dist = (ee_world - cup_pos).norm(dim=-1)
+        obj_pos = self.pickup_obj.data.root_pos_w
+        dist = (ee_world - obj_pos).norm(dim=-1)
         mean_dist = dist.mean().item()
 
         if mean_dist < max_dist:
             # Compute offset: cup_pos - ee_pos in palm frame (keep actual distance)
-            diff_world = cup_pos - ee_world
+            diff_world = obj_pos - ee_world
             self._attach_offset_body = quat_apply_inverse(palm_quat, diff_world)
             self._object_attached = True
-            print(f"  [MagneticGrasp] Cup attached! dist={mean_dist:.3f}m")
+            print(f"  [MagneticGrasp] Object attached! dist={mean_dist:.3f}m")
             return True
         else:
-            print(f"  [MagneticGrasp] Cup too far: {mean_dist:.3f}m (max: {max_dist:.2f}m)")
+            print(f"  [MagneticGrasp] Object too far: {mean_dist:.3f}m (max: {max_dist:.2f}m)")
             return False
 
     def detach_object(self):
-        """Release the attached cup (it will fall under gravity)."""
+        """Release the attached object (it will fall under gravity)."""
         if self._object_attached:
             self._object_attached = False
-            print("  [MagneticGrasp] Cup detached")
+            print("  [MagneticGrasp] Object detached")
 
     # ================================================================== #
     #  Debug Visualization: draw EE and target spheres
@@ -1073,11 +1017,11 @@ class HierarchicalG1Env:
             )
             self._target_marker = VisualizationMarkers(target_cfg)
 
-            # Create cup position marker (blue sphere)
-            cup_cfg = VisualizationMarkersCfg(
-                prim_path="/World/Visuals/Cup_Marker",
+            # Create object position marker (blue sphere)
+            obj_cfg = VisualizationMarkersCfg(
+                prim_path="/World/Visuals/Obj_Marker",
                 markers={
-                    "cup": sim_utils.SphereCfg(
+                    "obj": sim_utils.SphereCfg(
                         radius=0.025,
                         visual_material=sim_utils.PreviewSurfaceCfg(
                             diffuse_color=(0.0, 0.5, 1.0),  # Blue
@@ -1085,13 +1029,13 @@ class HierarchicalG1Env:
                     ),
                 },
             )
-            self._cup_marker = VisualizationMarkers(cup_cfg)
-            print("[Debug] Markers enabled: GREEN=EE, RED=target, BLUE=cup")
+            self._obj_marker = VisualizationMarkers(obj_cfg)
+            print("[Debug] Markers enabled: GREEN=EE, RED=target, BLUE=object")
 
         if not enabled and self._ee_marker is not None:
             self._ee_marker.set_visibility(False)
             self._target_marker.set_visibility(False)
-            self._cup_marker.set_visibility(False)
+            self._obj_marker.set_visibility(False)
             print("[Debug] Markers disabled")
 
     def update_debug_markers(self):
@@ -1103,15 +1047,15 @@ class HierarchicalG1Env:
 
         ee_world, _ = self._compute_palm_ee()
         target_world = self._arm_target_world
-        cup_world = self.cup.data.root_pos_w
+        obj_world = self.pickup_obj.data.root_pos_w
 
         # Update marker positions (all envs)
         self._ee_marker.visualize(translations=ee_world.detach().cpu().numpy())
         self._target_marker.visualize(translations=target_world.detach().cpu().numpy())
-        self._cup_marker.visualize(translations=cup_world.detach().cpu().numpy())
+        self._obj_marker.visualize(translations=obj_world.detach().cpu().numpy())
 
     def _update_attached_object(self):
-        """Teleport attached cup to follow the palm each sim step.
+        """Teleport attached object to follow the palm each sim step.
         Call this AFTER scene.write_data_to_sim() and BEFORE sim.step().
         """
         if not self._object_attached:
@@ -1121,15 +1065,15 @@ class HierarchicalG1Env:
 
         ee_world, palm_quat = self._compute_palm_ee()
         # Reconstruct cup world position from saved offset
-        cup_target = ee_world + quat_apply(palm_quat, self._attach_offset_body)
+        obj_target = ee_world + quat_apply(palm_quat, self._attach_offset_body)
 
         # Build root state [N, 13]: pos(3) + quat(4) + lin_vel(3) + ang_vel(3)
-        root_state = self.cup.data.default_root_state.clone()
-        root_state[:, :3] = cup_target
+        root_state = self.pickup_obj.data.default_root_state.clone()
+        root_state[:, :3] = obj_target
         root_state[:, 3:7] = palm_quat  # cup follows palm orientation
         root_state[:, 7:] = 0.0  # zero velocity
 
-        self.cup.write_root_state_to_sim(root_state)
+        self.pickup_obj.write_root_state_to_sim(root_state)
 
     def _build_arm_obs(self) -> torch.Tensor:
         """

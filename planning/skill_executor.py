@@ -283,12 +283,12 @@ class SkillExecutor:
         self.semantic_map.update()
         per_env_pos = self.semantic_map.get_per_env_position(target)
         if per_env_pos is not None:
-            cup_pos_all = per_env_pos  # [num_envs, 3]
+            obj_pos_all = per_env_pos  # [num_envs, 3]
         else:
             target_pos = self.semantic_map.get_object_position(target)
             if target_pos is None:
                 return {"status": "failed", "reason": f"Target '{target}' not found"}
-            cup_pos_all = torch.tensor(
+            obj_pos_all = torch.tensor(
                 [target_pos], dtype=torch.float32, device=self.device,
             ).expand(env.num_envs, -1)
 
@@ -299,40 +299,40 @@ class SkillExecutor:
         root_quat = env.robot.data.root_quat_w
 
         # Cup in body frame
-        cup_body = quat_apply_inverse(root_quat, cup_pos_all - root_pos)
+        obj_body = quat_apply_inverse(root_quat, obj_pos_all - root_pos)
 
         # Direction from shoulder to cup
-        cup_from_shoulder = cup_body - shoulder_offset.unsqueeze(0)
-        dist_from_shoulder = cup_from_shoulder.norm(dim=-1, keepdim=True)
+        obj_from_shoulder = obj_body - shoulder_offset.unsqueeze(0)
+        dist_from_shoulder = obj_from_shoulder.norm(dim=-1, keepdim=True)
 
         # Debug: print world coordinates
         print(f"  [Reach] === DEBUG COORDINATES (env 0) ===")
         print(f"  [Reach]   Robot pos:    [{root_pos[0,0]:.3f}, {root_pos[0,1]:.3f}, {root_pos[0,2]:.3f}]")
-        print(f"  [Reach]   Cup world:    [{cup_pos_all[0,0]:.3f}, {cup_pos_all[0,1]:.3f}, {cup_pos_all[0,2]:.3f}]")
-        print(f"  [Reach]   Cup body:     [{cup_body[0,0]:.3f}, {cup_body[0,1]:.3f}, {cup_body[0,2]:.3f}]")
+        print(f"  [Reach]   Obj world:    [{obj_pos_all[0,0]:.3f}, {obj_pos_all[0,1]:.3f}, {obj_pos_all[0,2]:.3f}]")
+        print(f"  [Reach]   Obj body:     [{obj_body[0,0]:.3f}, {obj_body[0,1]:.3f}, {obj_body[0,2]:.3f}]")
         print(f"  [Reach]   Shoulder:     [{shoulder_offset[0]:.3f}, {shoulder_offset[1]:.3f}, {shoulder_offset[2]:.3f}]")
         print(f"  [Reach]   Dist from shoulder: {dist_from_shoulder.mean():.3f}m (max: {self.MAX_REACH}m)")
 
         # Clamp XY distance only, preserve cup Z height
         # Old approach: spherical clamping raised the target above the cup
         # New approach: clamp only the horizontal (XY) component from shoulder,
-        # keep Z at the actual cup height in body frame
-        cup_from_shoulder_xy = cup_from_shoulder[:, :2]  # [N, 2] XY only
-        dist_xy = cup_from_shoulder_xy.norm(dim=-1, keepdim=True)  # [N, 1]
+        # keep Z at the actual object height in body frame
+        obj_from_shoulder_xy = obj_from_shoulder[:, :2]  # [N, 2] XY only
+        dist_xy = obj_from_shoulder_xy.norm(dim=-1, keepdim=True)  # [N, 1]
         scale_xy = torch.clamp(self.MAX_REACH / (dist_xy + 1e-6), max=1.0)
 
-        reachable_target_body = torch.zeros_like(cup_body)
+        reachable_target_body = torch.zeros_like(obj_body)
         # XY: clamp from shoulder
-        reachable_target_body[:, :2] = shoulder_offset[:2].unsqueeze(0) + cup_from_shoulder_xy * scale_xy
-        # Z: keep at ACTUAL cup height (don't let clamping raise it)
-        reachable_target_body[:, 2] = cup_body[:, 2]
+        reachable_target_body[:, :2] = shoulder_offset[:2].unsqueeze(0) + obj_from_shoulder_xy * scale_xy
+        # Z: keep at ACTUAL object height (don't let clamping raise it)
+        reachable_target_body[:, 2] = obj_body[:, 2]
 
         # If cup is within MAX_REACH, target IS the cup
         clamped = (dist_xy.mean() > self.MAX_REACH)
         if clamped:
-            print(f"  [Reach] Target XY CLAMPED: {dist_xy.mean():.3f}m -> {self.MAX_REACH}m (Z kept at cup height)")
+            print(f"  [Reach] Target XY CLAMPED: {dist_xy.mean():.3f}m -> {self.MAX_REACH}m (Z kept at object height)")
         else:
-            print(f"  [Reach] Target within reach, using actual cup position")
+            print(f"  [Reach] Target within reach, using actual object position")
 
         print(f"  [Reach]   Reachable body: [{reachable_target_body[0,0]:.3f}, {reachable_target_body[0,1]:.3f}, {reachable_target_body[0,2]:.3f}]")
 
@@ -350,7 +350,7 @@ class SkillExecutor:
         # Active reaching (160 steps: 100 with lean + 60 stabilize)
         # Extra steps needed because smooth_alpha=0.6 makes convergence slower
         reach_steps = 160
-        best_cup_dist = float('inf')
+        best_obj_dist = float('inf')
         best_ee_dist = float('inf')
         attached_during_reach = False
 
@@ -365,11 +365,11 @@ class SkillExecutor:
 
             # Track distances using LIVE positions
             ee_world, _ = env._compute_palm_ee()
-            live_cup_pos = env.cup.data.root_pos_w
+            live_obj_pos = env.pickup_obj.data.root_pos_w
             ee_dist = (ee_world - env._arm_target_world).norm(dim=-1).mean().item()
-            cup_dist = (ee_world - live_cup_pos).norm(dim=-1).mean().item()
+            obj_dist = (ee_world - live_obj_pos).norm(dim=-1).mean().item()
             best_ee_dist = min(best_ee_dist, ee_dist)
-            best_cup_dist = min(best_cup_dist, cup_dist)
+            best_obj_dist = min(best_obj_dist, obj_dist)
 
             if step % 10 == 0:
                 h = obs["base_height"].mean().item()
@@ -377,24 +377,24 @@ class SkillExecutor:
                 # Detailed debug with world coordinates
                 print(f"  [Reach] Step {step:3d} | h={h:.2f} | "
                       f"stand={standing}/{env.num_envs} | "
-                      f"EE->tgt={ee_dist:.3f} | EE->cup={cup_dist:.3f} | "
+                      f"EE->tgt={ee_dist:.3f} | EE->obj={obj_dist:.3f} | "
                       f"EE=[{ee_world[0,0]:.2f},{ee_world[0,1]:.2f},{ee_world[0,2]:.2f}] "
-                      f"Cup=[{live_cup_pos[0,0]:.2f},{live_cup_pos[0,1]:.2f},{live_cup_pos[0,2]:.2f}]")
+                      f"Obj=[{live_obj_pos[0,0]:.2f},{live_obj_pos[0,1]:.2f},{live_obj_pos[0,2]:.2f}]")
 
             # Try magnetic attach as soon as EE is close enough
             # 0.15m trigger: cup attaches when hand is very close
-            if not attached_during_reach and cup_dist < 0.15:
+            if not attached_during_reach and obj_dist < 0.15:
                 attached_during_reach = env.attach_object_to_hand(max_dist=0.20)
                 if attached_during_reach:
                     print(f"  [Reach] ** Magnetic attach at step {step}! **")
                     break
 
             # Early success: EE is very close to actual cup
-            if cup_dist < 0.06:
-                print(f"  [Reach] ** Early success! EE->cup: {cup_dist:.3f}m **")
+            if obj_dist < 0.06:
+                print(f"  [Reach] ** Early success! EE->obj: {obj_dist:.3f}m **")
                 break
 
-        print(f"  [Reach] Best EE->target: {best_ee_dist:.3f}m, Best EE->cup: {best_cup_dist:.3f}m")
+        print(f"  [Reach] Best EE->target: {best_ee_dist:.3f}m, Best EE->obj: {best_obj_dist:.3f}m")
 
         # Hold phase: freeze arm, continue loco for stability
         print("  [Reach] Holding arm position (80 steps)...")
@@ -408,20 +408,20 @@ class SkillExecutor:
 
         # Final distance check
         ee_world, _ = env._compute_palm_ee()
-        live_cup_pos = env.cup.data.root_pos_w
+        live_obj_pos = env.pickup_obj.data.root_pos_w
         final_ee_dist = (ee_world - env._arm_target_world).norm(dim=-1).mean().item()
-        final_cup_dist = (ee_world - live_cup_pos).norm(dim=-1).mean().item()
-        print(f"  [Reach] Final EE->target: {final_ee_dist:.3f}m, EE->cup(live): {final_cup_dist:.3f}m")
+        final_obj_dist = (ee_world - live_obj_pos).norm(dim=-1).mean().item()
+        print(f"  [Reach] Final EE->target: {final_ee_dist:.3f}m, EE->obj(live): {final_obj_dist:.3f}m")
         print(f"  [Reach]   EE final:  [{ee_world[0,0]:.3f}, {ee_world[0,1]:.3f}, {ee_world[0,2]:.3f}]")
-        print(f"  [Reach]   Cup final: [{live_cup_pos[0,0]:.3f}, {live_cup_pos[0,1]:.3f}, {live_cup_pos[0,2]:.3f}]")
+        print(f"  [Reach]   Obj final: [{live_obj_pos[0,0]:.3f}, {live_obj_pos[0,1]:.3f}, {live_obj_pos[0,2]:.3f}]")
 
         return {
             "status": "success",
-            "reason": f"Reached (best cup dist: {best_cup_dist:.3f}m, final: {final_cup_dist:.3f}m)",
+            "reason": f"Reached (best cup dist: {best_obj_dist:.3f}m, final: {final_obj_dist:.3f}m)",
             "best_ee_dist": best_ee_dist,
-            "best_cup_dist": best_cup_dist,
+            "best_obj_dist": best_obj_dist,
             "final_ee_dist": final_ee_dist,
-            "cup_dist": final_cup_dist,
+            "obj_dist": final_obj_dist,
             "attached": attached_during_reach,
         }
 
@@ -429,10 +429,10 @@ class SkillExecutor:
     # grasp: Close fingers
     # ------------------------------------------------------------------
     def _execute_grasp(self) -> dict:
-        """Close fingers and magnetically attach cup to palm.
+        """Close fingers and magnetically attach object to palm.
 
         1. Close fingers (visual)
-        2. Try magnetic attach (snap cup to palm if close enough)
+        2. Try magnetic attach (snap object to palm if close enough)
            - Skipped if already attached during reach phase
         3. Hold for 50 steps to stabilize
         """
@@ -446,7 +446,7 @@ class SkillExecutor:
         # Check if already attached during reach
         already_attached = getattr(env, '_object_attached', False)
         if already_attached:
-            print("  [Grasp] Cup already attached from reach phase")
+            print("  [Grasp] Object already attached from reach phase")
 
         # Close fingers for 30 steps
         for step in range(30):
@@ -454,7 +454,7 @@ class SkillExecutor:
                 break
             obs = env.step_manipulation(self._stand_cmd, arm_targets)
 
-        # Magnetic attach: snap cup to palm (skip if already attached)
+        # Magnetic attach: snap object to palm (skip if already attached)
         if not already_attached:
             attached = env.attach_object_to_hand(max_dist=0.20)
         else:
@@ -473,17 +473,17 @@ class SkillExecutor:
                       f"Finger mean: {finger_pos.mean():.3f} | Attached: {attached}")
 
         if attached:
-            return {"status": "success", "reason": "Cup attached to hand"}
+            return {"status": "success", "reason": "Object attached to hand"}
         else:
-            return {"status": "success", "reason": "Fingers closed (cup not attached)"}
+            return {"status": "success", "reason": "Fingers closed (object not attached)"}
 
     # ------------------------------------------------------------------
     # place: Open fingers and return arm to default
     # ------------------------------------------------------------------
     def _execute_place(self) -> dict:
-        """Detach cup, open fingers, return arm to default.
+        """Detach object, open fingers, return arm to default.
 
-        1. Detach cup (drops under gravity)
+        1. Detach object (drops under gravity)
         2. Open fingers
         3. Return arm to default pose (heuristic)
         4. 200-step transition
@@ -493,7 +493,7 @@ class SkillExecutor:
 
         env = self.env
 
-        # Detach cup (magnetic grasp release)
+        # Detach object (magnetic grasp release)
         env.detach_object()
 
         # Switch to heuristic arm (default pose)

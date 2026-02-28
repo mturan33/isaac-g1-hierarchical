@@ -195,7 +195,7 @@ class SimplePlanner:
         """Generate a skill plan from task keywords and semantic map.
 
         Args:
-            task: Natural language task (e.g., "Pick up the red cup and place it on the second table")
+            task: Natural language task (e.g., "Pick up the steering wheel from the table")
             semantic_map_json: World state from SemanticMap.get_json()
 
         Returns:
@@ -209,9 +209,7 @@ class SimplePlanner:
         is_pick = any(w in task_lower for w in ["pick", "grab", "grasp", "get", "take"])
         is_place = any(w in task_lower for w in ["place", "put", "set", "drop"])
 
-        if is_pick and is_place:
-            return self._plan_pick_and_place(task_lower, objects, surfaces)
-        elif is_pick:
+        if is_pick:
             return self._plan_pick(task_lower, objects)
         elif is_place:
             return self._plan_place(task_lower, surfaces)
@@ -223,42 +221,14 @@ class SimplePlanner:
                 ]
             return []
 
-    def _plan_pick_and_place(self, task: str, objects: list, surfaces: list) -> list:
-        """Standard pick-and-place: walk -> reach -> grasp -> walk -> place."""
+    def _plan_pick(self, task: str, objects: list) -> list:
+        """Pick: walk -> reach -> grasp."""
         target_obj = self._find_target_object(task, objects)
-        target_surface = self._find_target_surface(task, surfaces)
-
         if target_obj is None:
             print("[SimplePlanner] No graspable object found in scene")
             return []
-
-        plan = [
-            # Cup is 3cm from table front edge (narrower table: 0.5m depth)
-            # 0.20m: close enough for arm reach, but far enough to not collide with table
-            {"skill": "walk_to", "params": {"target": target_obj["id"], "stop_distance": 0.20}},
-            {"skill": "reach", "params": {"target": target_obj["id"]}},
-            {"skill": "grasp", "params": {}},
-        ]
-
-        if target_surface is not None:
-            # hold_arm=True: keep arm at grasp position while walking to table2
-            # stop_distance for tables must be > half-depth + robot clearance
-            # table2 is 0.8m deep (half=0.4m), robot body ~0.25m -> 0.65m minimum
-            plan.append(
-                {"skill": "walk_to", "params": {"target": target_surface["id"], "stop_distance": 0.65, "hold_arm": True}}
-            )
-            plan.append({"skill": "place", "params": {}})
-        else:
-            print("[SimplePlanner] No target surface found, plan ends at grasp")
-
-        return plan
-
-    def _plan_pick(self, task: str, objects: list) -> list:
-        """Pick only: walk -> reach -> grasp."""
-        target_obj = self._find_target_object(task, objects)
-        if target_obj is None:
-            return []
         return [
+            # 0.20m: close enough for arm reach (0.35m max)
             {"skill": "walk_to", "params": {"target": target_obj["id"], "stop_distance": 0.20}},
             {"skill": "reach", "params": {"target": target_obj["id"]}},
             {"skill": "grasp", "params": {}},
@@ -270,7 +240,7 @@ class SimplePlanner:
         if target_surface is None:
             return []
         return [
-            {"skill": "walk_to", "params": {"target": target_surface["id"], "stop_distance": 0.65, "hold_arm": True}},
+            {"skill": "walk_to", "params": {"target": target_surface["id"], "stop_distance": 0.55, "hold_arm": True}},
             {"skill": "place", "params": {}},
         ]
 
@@ -281,8 +251,10 @@ class SimplePlanner:
             if not obj.get("graspable", False):
                 continue
             obj_class = obj["class"].lower()
-            if obj_class in task:
-                return obj
+            # Match any word in the class name
+            for word in obj_class.split("_"):
+                if word in task:
+                    return obj
 
         # Fallback: first graspable object
         for obj in objects:
@@ -292,21 +264,13 @@ class SimplePlanner:
 
     def _find_target_surface(self, task: str, surfaces: list) -> Optional[dict]:
         """Find the target surface from the task string."""
-        # Check for "second table", "table 2", "other table"
-        wants_second = any(w in task for w in ["second", "table 2", "other", "another", "back"])
-
-        if wants_second and len(surfaces) > 1:
-            # Return the second surface (table_02)
-            return surfaces[1]
-
         # Check for surface class match
         for surf in surfaces:
             surf_class = surf["class"].lower()
             if surf_class in task:
-                # If "second" not specified, return first matching
                 return surf
 
-        # Fallback: last surface (often the destination)
+        # Fallback: first surface
         if surfaces:
-            return surfaces[-1] if wants_second else surfaces[0]
+            return surfaces[0]
         return None
