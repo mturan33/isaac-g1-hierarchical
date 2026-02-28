@@ -242,9 +242,10 @@ class SimplePlanner:
 
         if target_surface is not None:
             # hold_arm=True: keep arm at grasp position while walking to table2
-            # stop_distance for tables must be > half table width + clearance
+            # stop_distance for tables must be > half-depth + robot clearance
+            # table2 is 0.8m deep (half=0.4m), robot body ~0.25m -> 0.65m minimum
             plan.append(
-                {"skill": "walk_to", "params": {"target": target_surface["id"], "stop_distance": 0.55, "hold_arm": True}}
+                {"skill": "walk_to", "params": {"target": target_surface["id"], "stop_distance": 0.65, "hold_arm": True}}
             )
             plan.append({"skill": "place", "params": {}})
         else:
@@ -269,7 +270,7 @@ class SimplePlanner:
         if target_surface is None:
             return []
         return [
-            {"skill": "walk_to", "params": {"target": target_surface["id"], "stop_distance": 0.55, "hold_arm": True}},
+            {"skill": "walk_to", "params": {"target": target_surface["id"], "stop_distance": 0.65, "hold_arm": True}},
             {"skill": "place", "params": {}},
         ]
 
