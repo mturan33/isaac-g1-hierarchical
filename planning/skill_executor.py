@@ -255,11 +255,15 @@ class SkillExecutor:
     def _execute_reach(self, target: str) -> dict:
         """Reach toward a target with the Stage 7 arm policy.
 
-        Improved reach strategy:
-        1. Set target at ACTUAL cup position (not aggressively clamped)
-        2. Active reaching with slow forward lean (robot walks toward cup)
-        3. Track EE-to-cup distance (not just EE-to-clamped-target)
-        4. Hold phase: freeze arm, continue loco for stability
+        Strategy (no lift phase - direct reach):
+        1. Compute reachable target clamped to MAX_REACH from shoulder
+        2. Set arm target and reach directly (no intermediate lift)
+        3. Slow forward lean for first 80 steps to close last cm
+        4. Track EE-to-cup distance, magnetic attach when close
+        5. Hold phase: freeze arm, continue loco for stability
+
+        Debug: prints world coordinates of EE, target, and cup each 10 steps.
+        Draws colored markers if env.enable_debug_markers(True) was called.
         """
         from isaaclab.utils.math import quat_apply_inverse, quat_apply
 
@@ -267,6 +271,9 @@ class SkillExecutor:
 
         if env.arm_policy is None:
             return {"status": "failed", "reason": "No arm policy loaded"}
+
+        # Enable debug visualization markers
+        env.enable_debug_markers(True)
 
         # Switch to manipulation mode + arm policy
         env.set_manipulation_mode(True)
@@ -297,21 +304,32 @@ class SkillExecutor:
         # Direction from shoulder to cup
         cup_from_shoulder = cup_body - shoulder_offset.unsqueeze(0)
         dist_from_shoulder = cup_from_shoulder.norm(dim=-1, keepdim=True)
-        print(f"  [Reach] Target distance from shoulder: {dist_from_shoulder.mean():.3f}m (max: {self.MAX_REACH}m)")
+
+        # Debug: print world coordinates
+        print(f"  [Reach] === DEBUG COORDINATES (env 0) ===")
+        print(f"  [Reach]   Robot pos:    [{root_pos[0,0]:.3f}, {root_pos[0,1]:.3f}, {root_pos[0,2]:.3f}]")
+        print(f"  [Reach]   Cup world:    [{cup_pos_all[0,0]:.3f}, {cup_pos_all[0,1]:.3f}, {cup_pos_all[0,2]:.3f}]")
+        print(f"  [Reach]   Cup body:     [{cup_body[0,0]:.3f}, {cup_body[0,1]:.3f}, {cup_body[0,2]:.3f}]")
+        print(f"  [Reach]   Shoulder:     [{shoulder_offset[0]:.3f}, {shoulder_offset[1]:.3f}, {shoulder_offset[2]:.3f}]")
+        print(f"  [Reach]   Dist from shoulder: {dist_from_shoulder.mean():.3f}m (max: {self.MAX_REACH}m)")
 
         # Clamp to MAX_REACH
         scale = torch.clamp(self.MAX_REACH / (dist_from_shoulder + 1e-6), max=1.0)
         reachable_target_body = shoulder_offset.unsqueeze(0) + cup_from_shoulder * scale
 
-        # If cup is within MAX_REACH, target IS the cup — no clamping needed
+        # If cup is within MAX_REACH, target IS the cup
         clamped = (dist_from_shoulder.mean() > self.MAX_REACH)
         if clamped:
-            print(f"  [Reach] Target clamped: {dist_from_shoulder.mean():.3f}m -> {self.MAX_REACH}m")
+            print(f"  [Reach] Target CLAMPED: {dist_from_shoulder.mean():.3f}m -> {self.MAX_REACH}m")
         else:
             print(f"  [Reach] Target within reach, using actual cup position")
 
-        # Convert to world frame
+        print(f"  [Reach]   Reachable body: [{reachable_target_body[0,0]:.3f}, {reachable_target_body[0,1]:.3f}, {reachable_target_body[0,2]:.3f}]")
+
+        # Convert to world frame and set as arm target
         reachable_target_world = quat_apply(root_quat, reachable_target_body) + root_pos
+        print(f"  [Reach]   Reachable world: [{reachable_target_world[0,0]:.3f}, {reachable_target_world[0,1]:.3f}, {reachable_target_world[0,2]:.3f}]")
+
         env.set_arm_target_world(reachable_target_world)
         env.reset_arm_policy_state()
 
@@ -319,12 +337,13 @@ class SkillExecutor:
         lean_cmd = torch.zeros(env.num_envs, 3, device=self.device)
         lean_cmd[:, 0] = 0.15  # slow forward
 
-        # Phase A: Active reaching (120 steps with forward lean)
+        # Active reaching (120 steps: 80 with lean + 40 stabilize)
         reach_steps = 120
         best_cup_dist = float('inf')
         best_ee_dist = float('inf')
         attached_during_reach = False
 
+        print(f"  [Reach] Starting active reach ({reach_steps} steps)...")
         for step in range(reach_steps):
             if not self._is_running():
                 break
@@ -333,7 +352,7 @@ class SkillExecutor:
             cmd = lean_cmd if step < 80 else self._stand_cmd
             obs = env.step_arm_policy(cmd)
 
-            # Track distances using LIVE cup position (may have been knocked)
+            # Track distances using LIVE positions
             ee_world, _ = env._compute_palm_ee()
             live_cup_pos = env.cup.data.root_pos_w
             ee_dist = (ee_world - env._arm_target_world).norm(dim=-1).mean().item()
@@ -341,30 +360,32 @@ class SkillExecutor:
             best_ee_dist = min(best_ee_dist, ee_dist)
             best_cup_dist = min(best_cup_dist, cup_dist)
 
-            if step % 20 == 0:
+            if step % 10 == 0:
                 h = obs["base_height"].mean().item()
                 standing = (obs["base_height"] > 0.5).sum().item()
-                print(f"  [Reach] Step {step:4d} | Height: {h:.2f}m | "
-                      f"Standing: {standing}/{env.num_envs} | "
-                      f"EE->target: {ee_dist:.3f}m | EE->cup: {cup_dist:.3f}m")
+                # Detailed debug with world coordinates
+                print(f"  [Reach] Step {step:3d} | h={h:.2f} | "
+                      f"stand={standing}/{env.num_envs} | "
+                      f"EE->tgt={ee_dist:.3f} | EE->cup={cup_dist:.3f} | "
+                      f"EE=[{ee_world[0,0]:.2f},{ee_world[0,1]:.2f},{ee_world[0,2]:.2f}] "
+                      f"Cup=[{live_cup_pos[0,0]:.2f},{live_cup_pos[0,1]:.2f},{live_cup_pos[0,2]:.2f}]")
 
             # Try magnetic attach as soon as EE is close enough
-            # This prevents the oscillation from knocking the cup away
-            if not attached_during_reach and cup_dist < 0.20:
-                attached_during_reach = env.attach_object_to_hand(max_dist=0.25)
+            if not attached_during_reach and cup_dist < 0.15:
+                attached_during_reach = env.attach_object_to_hand(max_dist=0.20)
                 if attached_during_reach:
-                    print(f"  [Reach] Magnetic attach during reach at step {step}!")
+                    print(f"  [Reach] ** Magnetic attach at step {step}! **")
                     break
 
             # Early success: EE is very close to actual cup
             if cup_dist < 0.06:
-                print(f"  [Reach] Early success! EE->cup: {cup_dist:.3f}m")
+                print(f"  [Reach] ** Early success! EE->cup: {cup_dist:.3f}m **")
                 break
 
         print(f"  [Reach] Best EE->target: {best_ee_dist:.3f}m, Best EE->cup: {best_cup_dist:.3f}m")
 
-        # Phase B: Hold position (freeze arm, continue loco)
-        print("  [Reach] Holding arm position...")
+        # Hold phase: freeze arm, continue loco for stability
+        print("  [Reach] Holding arm position (80 steps)...")
         env.enable_arm_policy(False)
         self._hold_arm_targets = env.robot.data.joint_pos[:, env._arm_idx].clone()
 
@@ -373,19 +394,22 @@ class SkillExecutor:
                 break
             obs = env.step_manipulation(self._stand_cmd, self._hold_arm_targets)
 
-        # Final distance
+        # Final distance check
         ee_world, _ = env._compute_palm_ee()
+        live_cup_pos = env.cup.data.root_pos_w
         final_ee_dist = (ee_world - env._arm_target_world).norm(dim=-1).mean().item()
-        cup_dist = (ee_world - cup_pos_all).norm(dim=-1).mean().item()
-        print(f"  [Reach] Final EE->target: {final_ee_dist:.3f}m, EE->cup: {cup_dist:.3f}m")
+        final_cup_dist = (ee_world - live_cup_pos).norm(dim=-1).mean().item()
+        print(f"  [Reach] Final EE->target: {final_ee_dist:.3f}m, EE->cup(live): {final_cup_dist:.3f}m")
+        print(f"  [Reach]   EE final:  [{ee_world[0,0]:.3f}, {ee_world[0,1]:.3f}, {ee_world[0,2]:.3f}]")
+        print(f"  [Reach]   Cup final: [{live_cup_pos[0,0]:.3f}, {live_cup_pos[0,1]:.3f}, {live_cup_pos[0,2]:.3f}]")
 
         return {
             "status": "success",
-            "reason": f"Reached (best cup dist: {best_cup_dist:.3f}m, final: {cup_dist:.3f}m)",
+            "reason": f"Reached (best cup dist: {best_cup_dist:.3f}m, final: {final_cup_dist:.3f}m)",
             "best_ee_dist": best_ee_dist,
             "best_cup_dist": best_cup_dist,
             "final_ee_dist": final_ee_dist,
-            "cup_dist": cup_dist,
+            "cup_dist": final_cup_dist,
             "attached": attached_during_reach,
         }
 
@@ -420,7 +444,7 @@ class SkillExecutor:
 
         # Magnetic attach: snap cup to palm (skip if already attached)
         if not already_attached:
-            attached = env.attach_object_to_hand(max_dist=0.25)
+            attached = env.attach_object_to_hand(max_dist=0.20)
         else:
             attached = True
 

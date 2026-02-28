@@ -53,6 +53,7 @@ from isaaclab.terrains import TerrainImporterCfg
 from isaaclab.utils import configclass
 from isaaclab.utils.assets import ISAAC_NUCLEUS_DIR
 from isaaclab.utils.math import quat_apply_inverse
+from isaaclab.markers import VisualizationMarkers, VisualizationMarkersCfg
 
 
 # =============================================================================
@@ -524,6 +525,11 @@ class HierarchicalG1Env:
         self._object_attached = False
         self._attach_offset_body = torch.zeros(num_envs, 3, device=device)  # offset in palm frame
 
+        # -- Debug visualization markers --
+        self._debug_markers_enabled = False
+        self._ee_marker: Optional[VisualizationMarkers] = None
+        self._target_marker: Optional[VisualizationMarkers] = None
+
         print(f"[HierarchicalG1Env V6.2] {num_envs} envs, device={device}")
         print(f"[HierarchicalG1Env V6.2] Control: {1.0/self.control_dt:.0f} Hz "
               f"({self.decimation}x decimation)")
@@ -778,6 +784,8 @@ class HierarchicalG1Env:
 
         self.scene.update(self.control_dt)
         self.step_count += 1
+        # Update debug markers each step
+        self.update_debug_markers()
         return self.get_obs()
 
     # --------------------------------------------------------------------- #
@@ -959,15 +967,15 @@ class HierarchicalG1Env:
     #  Magnetic Grasp: attach/detach cup to/from palm
     # ================================================================== #
 
-    def attach_object_to_hand(self, max_dist: float = 0.20, hold_distance: float = 0.10) -> bool:
-        """Snap the cup to the palm if EE is within max_dist.
+    def attach_object_to_hand(self, max_dist: float = 0.20) -> bool:
+        """Attach the cup to the palm if EE is within max_dist.
 
         Computes offset from palm to cup center in palm local frame,
-        then scales it to hold_distance so the cup is held near the palm.
+        then each subsequent sim step teleports the cup to follow the palm.
+        No snap: cup stays at its actual distance from palm.
 
         Args:
             max_dist: Max EE-cup distance to trigger attach.
-            hold_distance: How close to hold the cup (m). 0 = at palm, None = keep actual distance.
 
         Returns True if attached, False if too far.
         """
@@ -977,19 +985,11 @@ class HierarchicalG1Env:
         mean_dist = dist.mean().item()
 
         if mean_dist < max_dist:
-            # Compute offset: cup_pos - ee_pos in palm frame
+            # Compute offset: cup_pos - ee_pos in palm frame (keep actual distance)
             diff_world = cup_pos - ee_world
-            offset_body = quat_apply_inverse(palm_quat, diff_world)
-            # Scale offset so cup is held at hold_distance from palm
-            offset_norm = offset_body.norm(dim=-1, keepdim=True)
-            if hold_distance is not None and offset_norm.mean() > hold_distance:
-                self._attach_offset_body = offset_body * (hold_distance / (offset_norm + 1e-6))
-                actual_hold = hold_distance
-            else:
-                self._attach_offset_body = offset_body
-                actual_hold = offset_norm.mean().item()
+            self._attach_offset_body = quat_apply_inverse(palm_quat, diff_world)
             self._object_attached = True
-            print(f"  [MagneticGrasp] Cup attached! dist={mean_dist:.3f}m, held at {actual_hold:.2f}m")
+            print(f"  [MagneticGrasp] Cup attached! dist={mean_dist:.3f}m")
             return True
         else:
             print(f"  [MagneticGrasp] Cup too far: {mean_dist:.3f}m (max: {max_dist:.2f}m)")
@@ -1000,6 +1000,84 @@ class HierarchicalG1Env:
         if self._object_attached:
             self._object_attached = False
             print("  [MagneticGrasp] Cup detached")
+
+    # ================================================================== #
+    #  Debug Visualization: draw EE and target spheres
+    # ================================================================== #
+
+    def enable_debug_markers(self, enabled: bool = True):
+        """Enable/disable debug visualization markers for EE and arm target.
+
+        Creates colored spheres:
+          - GREEN sphere: End-Effector (palm EE) position
+          - RED sphere: Arm target position (where arm is trying to reach)
+        """
+        self._debug_markers_enabled = enabled
+        if enabled and self._ee_marker is None:
+            # Create EE marker (green sphere)
+            ee_cfg = VisualizationMarkersCfg(
+                prim_path="/World/Visuals/EE_Marker",
+                markers={
+                    "ee": sim_utils.SphereCfg(
+                        radius=0.03,
+                        visual_material=sim_utils.PreviewSurfaceCfg(
+                            diffuse_color=(0.0, 1.0, 0.0),  # Green
+                        ),
+                    ),
+                },
+            )
+            self._ee_marker = VisualizationMarkers(ee_cfg)
+
+            # Create arm target marker (red sphere)
+            target_cfg = VisualizationMarkersCfg(
+                prim_path="/World/Visuals/Target_Marker",
+                markers={
+                    "target": sim_utils.SphereCfg(
+                        radius=0.03,
+                        visual_material=sim_utils.PreviewSurfaceCfg(
+                            diffuse_color=(1.0, 0.0, 0.0),  # Red
+                        ),
+                    ),
+                },
+            )
+            self._target_marker = VisualizationMarkers(target_cfg)
+
+            # Create cup position marker (blue sphere)
+            cup_cfg = VisualizationMarkersCfg(
+                prim_path="/World/Visuals/Cup_Marker",
+                markers={
+                    "cup": sim_utils.SphereCfg(
+                        radius=0.025,
+                        visual_material=sim_utils.PreviewSurfaceCfg(
+                            diffuse_color=(0.0, 0.5, 1.0),  # Blue
+                        ),
+                    ),
+                },
+            )
+            self._cup_marker = VisualizationMarkers(cup_cfg)
+            print("[Debug] Markers enabled: GREEN=EE, RED=target, BLUE=cup")
+
+        if not enabled and self._ee_marker is not None:
+            self._ee_marker.set_visibility(False)
+            self._target_marker.set_visibility(False)
+            self._cup_marker.set_visibility(False)
+            print("[Debug] Markers disabled")
+
+    def update_debug_markers(self):
+        """Update debug marker positions to current EE and target.
+        Call this each step during reach to visualize arm tracking.
+        """
+        if not self._debug_markers_enabled or self._ee_marker is None:
+            return
+
+        ee_world, _ = self._compute_palm_ee()
+        target_world = self._arm_target_world
+        cup_world = self.cup.data.root_pos_w
+
+        # Update marker positions (all envs)
+        self._ee_marker.visualize(translations=ee_world.detach().cpu().numpy())
+        self._target_marker.visualize(translations=target_world.detach().cpu().numpy())
+        self._cup_marker.visualize(translations=cup_world.detach().cpu().numpy())
 
     def _update_attached_object(self):
         """Teleport attached cup to follow the palm each sim step.
@@ -1175,6 +1253,8 @@ class HierarchicalG1Env:
 
         self.scene.update(self.control_dt)
         self.step_count += 1
+        # Update debug markers each step
+        self.update_debug_markers()
         return self.get_obs()
 
     # --------------------------------------------------------------------- #
