@@ -1,11 +1,17 @@
 """
 Walk-To Skill
 ==============
-Navigate the robot to a target (x, y) position using the low-level
-locomotion policy's velocity command interface.
+Navigate the robot to a target (x, y) position using an adaptive PID
+controller that compensates for locomotion policy inconsistencies.
 
 Architecture:
-    target (x, y) → VelocityCommandGenerator → [vx, vy, vyaw] → LocoPolicy → joint targets
+    target (x, y) -> AdaptivePIDWalkController -> [vx, vy, vyaw] -> LocoPolicy -> joint targets
+
+The PID controller:
+    - Turns in place when heading error > 40 degrees
+    - Uses integral term to detect and overcome stalls
+    - Scales forward velocity by heading alignment
+    - Decelerates smoothly on final approach
 
 Termination:
     - Success: distance to target < threshold
@@ -19,35 +25,43 @@ import torch
 from typing import Optional
 
 from .base_skill import BaseSkill, SkillResult, SkillStatus
-from ..low_level.velocity_command import VelocityCommandGenerator, get_yaw_from_quat
+from ..low_level.velocity_command import AdaptivePIDWalkController, get_yaw_from_quat
 from ..config.skill_config import WalkToConfig
 from ..config.joint_config import MIN_BASE_HEIGHT
 
 
 class WalkToSkill(BaseSkill):
-    """Walk to a target XY position."""
+    """Walk to a target XY position using adaptive PID control."""
 
     def __init__(
         self,
         config: Optional[WalkToConfig] = None,
         device: str = "cuda",
+        num_envs: int = 1,
     ):
         super().__init__(name="walk_to", device=device)
         self.cfg = config or WalkToConfig()
         self._max_steps = self.cfg.max_steps
+        self._num_envs = num_envs
 
-        # Velocity command generator
-        self.cmd_gen = VelocityCommandGenerator(
-            kp_linear=self.cfg.kp_linear,
-            kp_angular=self.cfg.kp_angular,
-            max_lin_vel_x=self.cfg.max_forward_vel,
-            max_lin_vel_y=self.cfg.max_lateral_vel,
-            max_ang_vel_z=self.cfg.max_yaw_rate,
-            device=device,
-        )
+        # Adaptive PID controller
+        self._pid: Optional[AdaptivePIDWalkController] = None
 
         # Target
         self._target_pos: Optional[torch.Tensor] = None
+
+    def _ensure_pid(self, num_envs: int):
+        """Create/recreate PID controller if needed."""
+        if self._pid is None or self._pid.num_envs != num_envs:
+            self._pid = AdaptivePIDWalkController(
+                max_lin_vel_x=self.cfg.max_forward_vel,
+                max_lin_vel_y=self.cfg.max_lateral_vel,
+                max_ang_vel_z=self.cfg.max_yaw_rate,
+                num_envs=num_envs,
+                device=str(self.device),
+            )
+        else:
+            self._pid.reset()
 
     def reset(
         self,
@@ -67,14 +81,18 @@ class WalkToSkill(BaseSkill):
         super().reset()
         if target_positions is not None:
             self._target_pos = target_positions.to(dtype=torch.float32, device=self.device)
-            print(f"[WalkTo] Per-env targets: {self._target_pos.shape[0]} envs")
+            num_envs = self._target_pos.shape[0]
+            print(f"[WalkTo] Per-env targets: {num_envs} envs")
         elif target_x is not None and target_y is not None:
             self._target_pos = torch.tensor(
                 [[target_x, target_y]], dtype=torch.float32, device=self.device
             )
+            num_envs = 1
             print(f"[WalkTo] Target: ({target_x:.2f}, {target_y:.2f})")
         else:
             raise ValueError("Must provide target_positions or (target_x, target_y)")
+
+        self._ensure_pid(num_envs)
 
     def step(
         self, obs_dict: dict[str, torch.Tensor]
@@ -114,12 +132,16 @@ class WalkToSkill(BaseSkill):
         if target.shape[0] == 1 and robot_pos_xy.shape[0] > 1:
             target = target.expand(robot_pos_xy.shape[0], -1)
 
-        # Compute velocity command
-        cmd_vel, distance = self.cmd_gen.compute_walk_command(
+        # Ensure PID controller exists with correct num_envs
+        if self._pid is None:
+            self._ensure_pid(robot_pos_xy.shape[0])
+
+        # Compute velocity command with adaptive PID
+        cmd_vel, distance = self._pid.compute(
             robot_pos_xy, robot_yaw, target
         )
 
-        # Check arrival — use stop_distance if set, otherwise position_threshold
+        # Check arrival -- use stop_distance if set, otherwise position_threshold
         # Use mean distance (not .all()) to prevent one slow env from blocking everyone
         arrival_dist = self.cfg.stop_distance if self.cfg.stop_distance > 0 else self.cfg.position_threshold
         if distance.mean() < arrival_dist:
@@ -132,10 +154,12 @@ class WalkToSkill(BaseSkill):
 
         # Log progress periodically
         if self._step_count % 100 == 0:
+            stall = f", boost={self._pid._stall_boost.mean():.2f}" if self._pid._stall_boost.mean() > 0.01 else ""
             print(
                 f"[WalkTo] Step {self._step_count}: "
                 f"dist={distance.mean().item():.2f}m, "
                 f"cmd=[{cmd_vel[0,0]:.2f}, {cmd_vel[0,1]:.2f}, {cmd_vel[0,2]:.2f}]"
+                f"{stall}"
             )
 
         return cmd_vel, False, self._make_running(

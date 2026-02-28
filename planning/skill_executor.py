@@ -160,7 +160,7 @@ class SkillExecutor:
         if hold_arm:
             # Slower, more stable walking when carrying object
             walk_cfg.max_forward_vel = 0.5
-            walk_cfg.max_yaw_rate = 0.5
+            walk_cfg.max_yaw_rate = 0.8  # Need fast yaw for 180-degree turns
             walk_cfg.max_lateral_vel = 0.2
         else:
             walk_cfg.max_yaw_rate = 0.8  # rad/s — faster turning for large direction changes
