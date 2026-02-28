@@ -959,11 +959,15 @@ class HierarchicalG1Env:
     #  Magnetic Grasp: attach/detach cup to/from palm
     # ================================================================== #
 
-    def attach_object_to_hand(self, max_dist: float = 0.20) -> bool:
+    def attach_object_to_hand(self, max_dist: float = 0.20, hold_distance: float = 0.05) -> bool:
         """Snap the cup to the palm if EE is within max_dist.
 
         Computes offset from palm to cup center in palm local frame,
-        then each subsequent sim step teleports the cup to follow the palm.
+        then scales it down to hold_distance so the cup is held close to palm.
+
+        Args:
+            max_dist: Max EE-cup distance to trigger attach.
+            hold_distance: How close to hold the cup (m). Cup snaps to this distance from palm.
 
         Returns True if attached, False if too far.
         """
@@ -975,9 +979,12 @@ class HierarchicalG1Env:
         if mean_dist < max_dist:
             # Compute offset: cup_pos - ee_pos in palm frame
             diff_world = cup_pos - ee_world
-            self._attach_offset_body = quat_apply_inverse(palm_quat, diff_world)
+            offset_body = quat_apply_inverse(palm_quat, diff_world)
+            # Scale offset so cup is held at hold_distance from palm
+            offset_norm = offset_body.norm(dim=-1, keepdim=True)
+            self._attach_offset_body = offset_body * (hold_distance / (offset_norm + 1e-6))
             self._object_attached = True
-            print(f"  [MagneticGrasp] Cup attached! dist={mean_dist:.3f}m")
+            print(f"  [MagneticGrasp] Cup attached! dist={mean_dist:.3f}m, snapped to {hold_distance:.2f}m")
             return True
         else:
             print(f"  [MagneticGrasp] Cup too far: {mean_dist:.3f}m (max: {max_dist:.2f}m)")
