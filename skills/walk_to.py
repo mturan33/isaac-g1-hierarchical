@@ -120,8 +120,9 @@ class WalkToSkill(BaseSkill):
         )
 
         # Check arrival — use stop_distance if set, otherwise position_threshold
+        # Use mean distance (not .all()) to prevent one slow env from blocking everyone
         arrival_dist = self.cfg.stop_distance if self.cfg.stop_distance > 0 else self.cfg.position_threshold
-        if (distance < arrival_dist).all():
+        if distance.mean() < arrival_dist:
             # Stop the robot
             zero_cmd = torch.zeros_like(cmd_vel)
             return zero_cmd, True, self._make_success(
