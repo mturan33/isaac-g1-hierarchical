@@ -313,14 +313,24 @@ class SkillExecutor:
         print(f"  [Reach]   Shoulder:     [{shoulder_offset[0]:.3f}, {shoulder_offset[1]:.3f}, {shoulder_offset[2]:.3f}]")
         print(f"  [Reach]   Dist from shoulder: {dist_from_shoulder.mean():.3f}m (max: {self.MAX_REACH}m)")
 
-        # Clamp to MAX_REACH
-        scale = torch.clamp(self.MAX_REACH / (dist_from_shoulder + 1e-6), max=1.0)
-        reachable_target_body = shoulder_offset.unsqueeze(0) + cup_from_shoulder * scale
+        # Clamp XY distance only, preserve cup Z height
+        # Old approach: spherical clamping raised the target above the cup
+        # New approach: clamp only the horizontal (XY) component from shoulder,
+        # keep Z at the actual cup height in body frame
+        cup_from_shoulder_xy = cup_from_shoulder[:, :2]  # [N, 2] XY only
+        dist_xy = cup_from_shoulder_xy.norm(dim=-1, keepdim=True)  # [N, 1]
+        scale_xy = torch.clamp(self.MAX_REACH / (dist_xy + 1e-6), max=1.0)
+
+        reachable_target_body = torch.zeros_like(cup_body)
+        # XY: clamp from shoulder
+        reachable_target_body[:, :2] = shoulder_offset[:2].unsqueeze(0) + cup_from_shoulder_xy * scale_xy
+        # Z: keep at ACTUAL cup height (don't let clamping raise it)
+        reachable_target_body[:, 2] = cup_body[:, 2]
 
         # If cup is within MAX_REACH, target IS the cup
-        clamped = (dist_from_shoulder.mean() > self.MAX_REACH)
+        clamped = (dist_xy.mean() > self.MAX_REACH)
         if clamped:
-            print(f"  [Reach] Target CLAMPED: {dist_from_shoulder.mean():.3f}m -> {self.MAX_REACH}m")
+            print(f"  [Reach] Target XY CLAMPED: {dist_xy.mean():.3f}m -> {self.MAX_REACH}m (Z kept at cup height)")
         else:
             print(f"  [Reach] Target within reach, using actual cup position")
 
