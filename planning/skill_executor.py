@@ -31,7 +31,7 @@ class SkillExecutor:
 
     # Right shoulder offset in body frame (from arm_policy_wrapper.py)
     SHOULDER_OFFSET = [0.0, -0.174, 0.259]
-    MAX_REACH = 0.32  # Stage 7 training workspace radius
+    MAX_REACH = 0.45  # Arm physical reach limit (training was 0.18-0.35m, but arm CAN extend further)
 
     def __init__(
         self,
@@ -229,10 +229,11 @@ class SkillExecutor:
     def _execute_reach(self, target: str) -> dict:
         """Reach toward a target with the Stage 7 arm policy.
 
-        Pattern from test_hierarchical.py Phase 3:
-        1. Compute reachable target (clamped to 0.32m from shoulder)
-        2. Active reaching: 80 steps with arm policy
-        3. Hold phase: freeze arm, continue loco for stability
+        Improved reach strategy:
+        1. Set target at ACTUAL cup position (not aggressively clamped)
+        2. Active reaching with slow forward lean (robot walks toward cup)
+        3. Track EE-to-cup distance (not just EE-to-clamped-target)
+        4. Hold phase: freeze arm, continue loco for stability
         """
         from isaaclab.utils.math import quat_apply_inverse, quat_apply
 
@@ -259,7 +260,6 @@ class SkillExecutor:
             ).expand(env.num_envs, -1)
 
         # Compute reachable target within arm workspace
-        # (exact pattern from test_hierarchical.py lines 226-251)
         shoulder_offset = torch.tensor(self.SHOULDER_OFFSET, device=self.device)
 
         root_pos = env.robot.data.root_pos_w
@@ -268,46 +268,71 @@ class SkillExecutor:
         # Cup in body frame
         cup_body = quat_apply_inverse(root_quat, cup_pos_all - root_pos)
 
-        # Direction from shoulder to cup, clamped to max_reach
+        # Direction from shoulder to cup
         cup_from_shoulder = cup_body - shoulder_offset.unsqueeze(0)
         dist_from_shoulder = cup_from_shoulder.norm(dim=-1, keepdim=True)
         print(f"  [Reach] Target distance from shoulder: {dist_from_shoulder.mean():.3f}m (max: {self.MAX_REACH}m)")
 
+        # Clamp to MAX_REACH (now 0.45m — generous enough for most cup positions)
         scale = torch.clamp(self.MAX_REACH / (dist_from_shoulder + 1e-6), max=1.0)
         reachable_target_body = shoulder_offset.unsqueeze(0) + cup_from_shoulder * scale
+
+        # If cup is within MAX_REACH, target IS the cup — no clamping needed
+        clamped = (dist_from_shoulder.mean() > self.MAX_REACH)
+        if clamped:
+            print(f"  [Reach] Target clamped: {dist_from_shoulder.mean():.3f}m -> {self.MAX_REACH}m")
+        else:
+            print(f"  [Reach] Target within reach, using actual cup position")
 
         # Convert to world frame
         reachable_target_world = quat_apply(root_quat, reachable_target_body) + root_pos
         env.set_arm_target_world(reachable_target_world)
         env.reset_arm_policy_state()
 
-        # Phase A: Active reaching (80 steps)
-        reach_steps = 80
+        # Slow forward lean velocity: 0.15 m/s helps close the last few cm
+        lean_cmd = torch.zeros(env.num_envs, 3, device=self.device)
+        lean_cmd[:, 0] = 0.15  # slow forward
+
+        # Phase A: Active reaching (120 steps with forward lean)
+        reach_steps = 120
+        best_cup_dist = float('inf')
         best_ee_dist = float('inf')
 
         for step in range(reach_steps):
             if not self._is_running():
                 break
-            obs = env.step_arm_policy(self._stand_cmd)
 
+            # Use lean velocity for first 80 steps, then stand still to stabilize
+            cmd = lean_cmd if step < 80 else self._stand_cmd
+            obs = env.step_arm_policy(cmd)
+
+            # Track distances
             ee_world, _ = env._compute_palm_ee()
             ee_dist = (ee_world - env._arm_target_world).norm(dim=-1).mean().item()
+            cup_dist = (ee_world - cup_pos_all).norm(dim=-1).mean().item()
             best_ee_dist = min(best_ee_dist, ee_dist)
+            best_cup_dist = min(best_cup_dist, cup_dist)
 
             if step % 20 == 0:
                 h = obs["base_height"].mean().item()
                 standing = (obs["base_height"] > 0.5).sum().item()
                 print(f"  [Reach] Step {step:4d} | Height: {h:.2f}m | "
-                      f"Standing: {standing}/{env.num_envs} | EE dist: {ee_dist:.3f}m")
+                      f"Standing: {standing}/{env.num_envs} | "
+                      f"EE->target: {ee_dist:.3f}m | EE->cup: {cup_dist:.3f}m")
 
-        print(f"  [Reach] Best EE dist: {best_ee_dist:.3f}m")
+            # Early success: EE is very close to actual cup
+            if cup_dist < 0.06:
+                print(f"  [Reach] Early success! EE->cup: {cup_dist:.3f}m")
+                break
+
+        print(f"  [Reach] Best EE->target: {best_ee_dist:.3f}m, Best EE->cup: {best_cup_dist:.3f}m")
 
         # Phase B: Hold position (freeze arm, continue loco)
         print("  [Reach] Holding arm position...")
         env.enable_arm_policy(False)
         self._hold_arm_targets = env.robot.data.joint_pos[:, env._arm_idx].clone()
 
-        for step in range(100):
+        for step in range(80):
             if not self._is_running():
                 break
             obs = env.step_manipulation(self._stand_cmd, self._hold_arm_targets)
@@ -320,8 +345,9 @@ class SkillExecutor:
 
         return {
             "status": "success",
-            "reason": f"Reached (best: {best_ee_dist:.3f}m, final: {final_ee_dist:.3f}m)",
+            "reason": f"Reached (best cup dist: {best_cup_dist:.3f}m, final: {cup_dist:.3f}m)",
             "best_ee_dist": best_ee_dist,
+            "best_cup_dist": best_cup_dist,
             "final_ee_dist": final_ee_dist,
             "cup_dist": cup_dist,
         }
