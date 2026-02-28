@@ -314,10 +314,12 @@ class HierarchicalSceneCfg(InteractiveSceneCfg):
     )
 
     # -- Table: 3.5 m ahead of robot spawn --
+    # Narrow table (0.5m depth) so robot can get closer to cup
+    # Front edge at x=3.25 (center 3.5, half-width 0.25)
     table: RigidObjectCfg = RigidObjectCfg(
         prim_path="{ENV_REGEX_NS}/Table",
         spawn=sim_utils.CuboidCfg(
-            size=(0.8, 1.2, 0.75),
+            size=(0.5, 1.2, 0.75),
             rigid_props=sim_utils.RigidBodyPropertiesCfg(kinematic_enabled=True),
             collision_props=sim_utils.CollisionPropertiesCfg(),
             visual_material=sim_utils.PreviewSurfaceCfg(
@@ -330,8 +332,7 @@ class HierarchicalSceneCfg(InteractiveSceneCfg):
     )
 
     # -- Red cup near the FRONT of the table --
-    # Table front edge is at x=3.1. Cup at x=3.2 (10cm from edge)
-    # so the robot can physically reach it.
+    # Cup at x=3.28 — just 3cm from front edge (3.25), easy to reach
     cup: RigidObjectCfg = RigidObjectCfg(
         prim_path="{ENV_REGEX_NS}/Cup",
         spawn=sim_utils.CylinderCfg(
@@ -345,7 +346,7 @@ class HierarchicalSceneCfg(InteractiveSceneCfg):
             ),
         ),
         init_state=RigidObjectCfg.InitialStateCfg(
-            pos=(3.2, 0.0, 0.80),
+            pos=(3.28, 0.0, 0.80),
         ),
     )
 

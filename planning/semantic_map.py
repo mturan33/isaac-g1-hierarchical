@@ -92,7 +92,7 @@ class SemanticMap:
             "class": "table",
             "position_3d": table_pos,
             "placeable": True,
-            "size": [0.8, 1.2, 0.75],
+            "size": [0.5, 1.2, 0.75],
         }
 
         # Table 2 (behind robot)
@@ -102,7 +102,7 @@ class SemanticMap:
             "class": "table",
             "position_3d": table2_pos,
             "placeable": True,
-            "size": [0.8, 1.2, 0.75],
+            "size": [0.8, 1.2, 0.75],  # table2 keeps original size
         }
 
     # ------------------------------------------------------------------

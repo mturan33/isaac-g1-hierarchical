@@ -223,7 +223,7 @@ def main():
         #
         # Right shoulder offset in body frame (from arm_policy_wrapper.py)
         shoulder_offset = torch.tensor([0.0, -0.174, 0.259], device=device)
-        max_reach = 0.45  # generous limit — arm can extend beyond training range
+        max_reach = 0.40  # conservative for Stage 7 (trained at 0.32m)
 
         # Get each env's cup position and robot state
         cup_pos_all = env.cup.data.root_pos_w.clone()  # [N, 3]

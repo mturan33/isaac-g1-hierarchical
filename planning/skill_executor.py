@@ -31,7 +31,7 @@ class SkillExecutor:
 
     # Right shoulder offset in body frame (from arm_policy_wrapper.py)
     SHOULDER_OFFSET = [0.0, -0.174, 0.259]
-    MAX_REACH = 0.45  # Arm physical reach limit (training was 0.18-0.35m, but arm CAN extend further)
+    MAX_REACH = 0.40  # Conservative for Stage 7 (trained at 0.32m), safe OOD extension
 
     def __init__(
         self,
@@ -115,11 +115,12 @@ class SkillExecutor:
     # ------------------------------------------------------------------
     # walk_to: Navigate to object/surface using WalkToSkill
     # ------------------------------------------------------------------
-    def _execute_walk_to(self, target: str, stop_distance: float = 0.25) -> dict:
+    def _execute_walk_to(self, target: str, stop_distance: float = 0.25, hold_arm: bool = False) -> dict:
         """Walk to an object or surface, stopping at stop_distance.
 
         Uses WalkToSkill with the semantic map position.
-        Stabilizes for 50 steps after arrival.
+        If hold_arm=True, keeps arm at current position (manipulation mode)
+        instead of switching to walking mode (which resets arm to default).
         """
         from ..skills.walk_to import WalkToSkill
         from ..config.skill_config import WalkToConfig
@@ -139,8 +140,18 @@ class SkillExecutor:
                 device=self.device,
             ).expand(self.env.num_envs, -1)
 
-        # Ensure walking mode
-        self.env.set_manipulation_mode(False)
+        env = self.env
+
+        if hold_arm and self._hold_arm_targets is not None:
+            # Keep manipulation mode — arm stays at current (grasp) position
+            print("  [WalkTo] Holding arm position during walk")
+            env.set_manipulation_mode(True)
+            env.enable_arm_policy(False)
+            arm_targets = self._hold_arm_targets
+        else:
+            # Normal walking mode — arm returns to default
+            env.set_manipulation_mode(False)
+            arm_targets = None
 
         # Configure WalkTo skill with stop_distance
         walk_cfg = WalkToConfig()
@@ -153,13 +164,19 @@ class SkillExecutor:
         skill.reset(target_positions=target_xy)
 
         # Execute walk loop
-        obs = self.env.get_obs()
+        obs = env.get_obs()
         walk_done = False
         start_time = time.time()
 
         while self._is_running() and not walk_done:
             vel_cmd, walk_done, result = skill.step(obs)
-            obs = self.env.step(vel_cmd)
+
+            if arm_targets is not None:
+                # Walk in manipulation mode, holding arm
+                obs = env.step_manipulation(vel_cmd, arm_targets)
+            else:
+                # Normal walking mode
+                obs = env.step(vel_cmd)
 
             # Safety: all robots fell
             if (obs["base_height"] < 0.2).all():
@@ -173,7 +190,10 @@ class SkillExecutor:
         for _ in range(50):
             if not self._is_running():
                 break
-            obs = self.env.step(self._stand_cmd)
+            if arm_targets is not None:
+                obs = env.step_manipulation(self._stand_cmd, arm_targets)
+            else:
+                obs = env.step(self._stand_cmd)
 
         if result.succeeded:
             return {"status": "success", "reason": f"Reached within {stop_distance}m of {target}"}

@@ -233,17 +233,18 @@ class SimplePlanner:
             return []
 
         plan = [
-            # stop_distance 0.30m: robot body collides with table at ~0.27m from cup
-            # arm policy can still reach (0.32m workspace from shoulder)
-            {"skill": "walk_to", "params": {"target": target_obj["id"], "stop_distance": 0.30}},
+            # Cup is 3cm from table front edge (narrower table: 0.5m depth)
+            # Robot can get much closer now
+            {"skill": "walk_to", "params": {"target": target_obj["id"], "stop_distance": 0.25}},
             {"skill": "reach", "params": {"target": target_obj["id"]}},
             {"skill": "grasp", "params": {}},
         ]
 
         if target_surface is not None:
-            # stop_distance for tables must be > half table width (0.4m) + clearance
+            # hold_arm=True: keep arm at grasp position while walking to table2
+            # stop_distance for tables must be > half table width + clearance
             plan.append(
-                {"skill": "walk_to", "params": {"target": target_surface["id"], "stop_distance": 0.55}}
+                {"skill": "walk_to", "params": {"target": target_surface["id"], "stop_distance": 0.55, "hold_arm": True}}
             )
             plan.append({"skill": "place", "params": {}})
         else:
@@ -257,7 +258,7 @@ class SimplePlanner:
         if target_obj is None:
             return []
         return [
-            {"skill": "walk_to", "params": {"target": target_obj["id"], "stop_distance": 0.30}},
+            {"skill": "walk_to", "params": {"target": target_obj["id"], "stop_distance": 0.25}},
             {"skill": "reach", "params": {"target": target_obj["id"]}},
             {"skill": "grasp", "params": {}},
         ]
@@ -268,7 +269,7 @@ class SimplePlanner:
         if target_surface is None:
             return []
         return [
-            {"skill": "walk_to", "params": {"target": target_surface["id"], "stop_distance": 0.55}},
+            {"skill": "walk_to", "params": {"target": target_surface["id"], "stop_distance": 0.55, "hold_arm": True}},
             {"skill": "place", "params": {}},
         ]
 
