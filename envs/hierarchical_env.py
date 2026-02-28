@@ -520,6 +520,10 @@ class HierarchicalG1Env:
         self._right_finger_lower: Optional[torch.Tensor] = None
         self._right_finger_upper: Optional[torch.Tensor] = None
 
+        # -- Magnetic grasp: snap cup to palm when close enough --
+        self._object_attached = False
+        self._attach_offset_body = torch.zeros(num_envs, 3, device=device)  # offset in palm frame
+
         print(f"[HierarchicalG1Env V6.2] {num_envs} envs, device={device}")
         print(f"[HierarchicalG1Env V6.2] Control: {1.0/self.control_dt:.0f} Hz "
               f"({self.decimation}x decimation)")
@@ -663,6 +667,7 @@ class HierarchicalG1Env:
         self.table.reset(indices)
         self.table2.reset(indices)
         self.cup.reset(indices)
+        self._object_attached = False  # release cup on reset
 
         # Write resets to sim and step once
         self.scene.write_data_to_sim()
@@ -730,6 +735,7 @@ class HierarchicalG1Env:
         # Physics sub-stepping
         for _ in range(self.decimation):
             self.scene.write_data_to_sim()
+            self._update_attached_object()
             self.sim.step()
 
         self.scene.update(self.control_dt)
@@ -767,6 +773,7 @@ class HierarchicalG1Env:
         # Physics sub-stepping
         for _ in range(self.decimation):
             self.scene.write_data_to_sim()
+            self._update_attached_object()
             self.sim.step()
 
         self.scene.update(self.control_dt)
@@ -948,6 +955,61 @@ class HierarchicalG1Env:
         ee_pos = palm_pos + PALM_FORWARD_OFFSET * palm_fwd
         return ee_pos, palm_quat
 
+    # ================================================================== #
+    #  Magnetic Grasp: attach/detach cup to/from palm
+    # ================================================================== #
+
+    def attach_object_to_hand(self, max_dist: float = 0.20) -> bool:
+        """Snap the cup to the palm if EE is within max_dist.
+
+        Computes offset from palm to cup center in palm local frame,
+        then each subsequent sim step teleports the cup to follow the palm.
+
+        Returns True if attached, False if too far.
+        """
+        ee_world, palm_quat = self._compute_palm_ee()
+        cup_pos = self.cup.data.root_pos_w
+        dist = (ee_world - cup_pos).norm(dim=-1)
+        mean_dist = dist.mean().item()
+
+        if mean_dist < max_dist:
+            # Compute offset: cup_pos - ee_pos in palm frame
+            diff_world = cup_pos - ee_world
+            self._attach_offset_body = quat_apply_inverse(palm_quat, diff_world)
+            self._object_attached = True
+            print(f"  [MagneticGrasp] Cup attached! dist={mean_dist:.3f}m")
+            return True
+        else:
+            print(f"  [MagneticGrasp] Cup too far: {mean_dist:.3f}m (max: {max_dist:.2f}m)")
+            return False
+
+    def detach_object(self):
+        """Release the attached cup (it will fall under gravity)."""
+        if self._object_attached:
+            self._object_attached = False
+            print("  [MagneticGrasp] Cup detached")
+
+    def _update_attached_object(self):
+        """Teleport attached cup to follow the palm each sim step.
+        Call this AFTER scene.write_data_to_sim() and BEFORE sim.step().
+        """
+        if not self._object_attached:
+            return
+
+        from isaaclab.utils.math import quat_apply
+
+        ee_world, palm_quat = self._compute_palm_ee()
+        # Reconstruct cup world position from saved offset
+        cup_target = ee_world + quat_apply(palm_quat, self._attach_offset_body)
+
+        # Build root state [N, 13]: pos(3) + quat(4) + lin_vel(3) + ang_vel(3)
+        root_state = self.cup.data.default_root_state.clone()
+        root_state[:, :3] = cup_target
+        root_state[:, 3:7] = palm_quat  # cup follows palm orientation
+        root_state[:, 7:] = 0.0  # zero velocity
+
+        self.cup.write_root_state_to_sim(root_state)
+
     def _build_arm_obs(self) -> torch.Tensor:
         """
         Build 55-dim observation for Stage 7 arm actor.
@@ -1096,6 +1158,7 @@ class HierarchicalG1Env:
         # Physics sub-stepping
         for _ in range(self.decimation):
             self.scene.write_data_to_sim()
+            self._update_attached_object()
             self.sim.step()
 
         self.scene.update(self.control_dt)

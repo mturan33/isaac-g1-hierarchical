@@ -157,8 +157,14 @@ class SkillExecutor:
         walk_cfg = WalkToConfig()
         walk_cfg.stop_distance = stop_distance
         walk_cfg.max_steps = 4000  # 80s at 50Hz — enough for 180-degree turns
-        walk_cfg.max_yaw_rate = 0.8  # rad/s — faster turning for large direction changes
-        walk_cfg.max_lateral_vel = 0.4  # m/s — faster lateral correction
+        if hold_arm:
+            # Slower, more stable walking when carrying object
+            walk_cfg.max_forward_vel = 0.5
+            walk_cfg.max_yaw_rate = 0.5
+            walk_cfg.max_lateral_vel = 0.2
+        else:
+            walk_cfg.max_yaw_rate = 0.8  # rad/s — faster turning for large direction changes
+            walk_cfg.max_lateral_vel = 0.4  # m/s — faster lateral correction
 
         skill = WalkToSkill(config=walk_cfg, device=str(self.device))
         skill.reset(target_positions=target_xy)
@@ -376,9 +382,11 @@ class SkillExecutor:
     # grasp: Close fingers
     # ------------------------------------------------------------------
     def _execute_grasp(self) -> dict:
-        """Close fingers to grasp. 100-step hold for secure grip.
+        """Close fingers and magnetically attach cup to palm.
 
-        Pattern from test_hierarchical.py Phase 4.
+        1. Close fingers (visual)
+        2. Try magnetic attach (snap cup to palm if close enough)
+        3. Hold for 50 steps to stabilize
         """
         env = self.env
         env.finger_controller.close(hand="both")
@@ -387,39 +395,50 @@ class SkillExecutor:
         if arm_targets is None:
             arm_targets = env.robot.data.joint_pos[:, env._arm_idx].clone()
 
-        for step in range(100):
+        # Close fingers for 30 steps first
+        for step in range(30):
+            if not self._is_running():
+                break
+            obs = env.step_manipulation(self._stand_cmd, arm_targets)
+
+        # Magnetic attach: snap cup to palm
+        attached = env.attach_object_to_hand(max_dist=0.25)
+
+        # Hold for 50 more steps
+        for step in range(50):
             if not self._is_running():
                 break
             obs = env.step_manipulation(self._stand_cmd, arm_targets)
 
             if step % 25 == 0:
                 finger_pos = obs["joint_pos_finger"]
-                closed = env.finger_controller.is_closed()
                 h = obs["base_height"].mean().item()
                 print(f"  [Grasp] Step {step:4d} | Height: {h:.2f}m | "
-                      f"Finger mean: {finger_pos.mean():.3f} | Closed: {closed}")
+                      f"Finger mean: {finger_pos.mean():.3f} | Attached: {attached}")
 
-        closed = env.finger_controller.is_closed()
-        if closed:
-            return {"status": "success", "reason": "Fingers closed"}
+        if attached:
+            return {"status": "success", "reason": "Cup attached to hand"}
         else:
-            return {"status": "success", "reason": "Grasp commanded (fingers closing)"}
+            return {"status": "success", "reason": "Fingers closed (cup not attached)"}
 
     # ------------------------------------------------------------------
     # place: Open fingers and return arm to default
     # ------------------------------------------------------------------
     def _execute_place(self) -> dict:
-        """Open fingers and return arm to default pose.
+        """Detach cup, open fingers, return arm to default.
 
-        Pattern from test_hierarchical.py Phase 6:
-        1. Open fingers
-        2. Return arm to default pose (heuristic)
-        3. 200-step transition
-        4. Switch back to walking mode
+        1. Detach cup (drops under gravity)
+        2. Open fingers
+        3. Return arm to default pose (heuristic)
+        4. 200-step transition
+        5. Switch back to walking mode
         """
         from ..low_level.arm_controller import ArmPose
 
         env = self.env
+
+        # Detach cup (magnetic grasp release)
+        env.detach_object()
 
         # Switch to heuristic arm (default pose)
         env.enable_arm_policy(False)
