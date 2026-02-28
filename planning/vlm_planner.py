@@ -124,7 +124,7 @@ ROBOT STATE:
 TASK: {task}
 
 IMPORTANT RULES:
-1. Robot must walk close enough to reach (stop_distance=0.15 for grasping)
+1. Robot must walk close enough to reach (stop_distance=0.20 for grasping)
 2. Arm workspace is only 0.32m - robot MUST be close to the object
 3. Always reach before grasping
 4. Always walk to destination before placing
@@ -234,8 +234,8 @@ class SimplePlanner:
 
         plan = [
             # Cup is 3cm from table front edge (narrower table: 0.5m depth)
-            # Robot can get much closer now
-            {"skill": "walk_to", "params": {"target": target_obj["id"], "stop_distance": 0.15}},
+            # 0.20m: close enough for arm reach, but far enough to not collide with table
+            {"skill": "walk_to", "params": {"target": target_obj["id"], "stop_distance": 0.20}},
             {"skill": "reach", "params": {"target": target_obj["id"]}},
             {"skill": "grasp", "params": {}},
         ]
@@ -258,7 +258,7 @@ class SimplePlanner:
         if target_obj is None:
             return []
         return [
-            {"skill": "walk_to", "params": {"target": target_obj["id"], "stop_distance": 0.15}},
+            {"skill": "walk_to", "params": {"target": target_obj["id"], "stop_distance": 0.20}},
             {"skill": "reach", "params": {"target": target_obj["id"]}},
             {"skill": "grasp", "params": {}},
         ]
