@@ -347,8 +347,9 @@ class SkillExecutor:
         lean_cmd = torch.zeros(env.num_envs, 3, device=self.device)
         lean_cmd[:, 0] = 0.15  # slow forward
 
-        # Active reaching (120 steps: 80 with lean + 40 stabilize)
-        reach_steps = 120
+        # Active reaching (160 steps: 100 with lean + 60 stabilize)
+        # Extra steps needed because smooth_alpha=0.6 makes convergence slower
+        reach_steps = 160
         best_cup_dist = float('inf')
         best_ee_dist = float('inf')
         attached_during_reach = False
@@ -358,8 +359,8 @@ class SkillExecutor:
             if not self._is_running():
                 break
 
-            # Use lean velocity for first 80 steps, then stand still to stabilize
-            cmd = lean_cmd if step < 80 else self._stand_cmd
+            # Use lean velocity for first 100 steps, then stand still to stabilize
+            cmd = lean_cmd if step < 100 else self._stand_cmd
             obs = env.step_arm_policy(cmd)
 
             # Track distances using LIVE positions
@@ -381,8 +382,9 @@ class SkillExecutor:
                       f"Cup=[{live_cup_pos[0,0]:.2f},{live_cup_pos[0,1]:.2f},{live_cup_pos[0,2]:.2f}]")
 
             # Try magnetic attach as soon as EE is close enough
-            if not attached_during_reach and cup_dist < 0.15:
-                attached_during_reach = env.attach_object_to_hand(max_dist=0.20)
+            # 0.25m trigger: attach early before arm oscillation knocks the cup
+            if not attached_during_reach and cup_dist < 0.25:
+                attached_during_reach = env.attach_object_to_hand(max_dist=0.30)
                 if attached_during_reach:
                     print(f"  [Reach] ** Magnetic attach at step {step}! **")
                     break

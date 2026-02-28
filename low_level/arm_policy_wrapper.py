@@ -204,7 +204,7 @@ class ArmPolicyWrapper:
         """
         return self.net(obs)
 
-    def get_arm_targets(self, obs: torch.Tensor, smooth_alpha: float = 0.3) -> torch.Tensor:
+    def get_arm_targets(self, obs: torch.Tensor, smooth_alpha: float = 0.6) -> torch.Tensor:
         """
         Get absolute joint targets from arm policy.
 
@@ -231,9 +231,18 @@ class ArmPolicyWrapper:
         self._prev_targets = targets.clone()
         return targets
 
-    def reset_state(self):
-        """Reset internal state (call when activating the arm policy)."""
-        self._prev_targets = None
+    def reset_state(self, current_targets: "torch.Tensor | None" = None):
+        """Reset internal state (call when activating the arm policy).
+
+        Args:
+            current_targets: [N, 5] current right arm joint positions.
+                If provided, used as initial smoothing reference so the
+                first step blends from the current pose instead of jumping.
+        """
+        if current_targets is not None:
+            self._prev_targets = current_targets.clone()
+        else:
+            self._prev_targets = None
 
     @staticmethod
     def build_obs(

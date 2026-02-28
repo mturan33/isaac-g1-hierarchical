@@ -340,7 +340,7 @@ class HierarchicalSceneCfg(InteractiveSceneCfg):
             radius=0.035,
             height=0.10,
             rigid_props=sim_utils.RigidBodyPropertiesCfg(),
-            mass_props=sim_utils.MassPropertiesCfg(mass=0.15),
+            mass_props=sim_utils.MassPropertiesCfg(mass=0.3),
             collision_props=sim_utils.CollisionPropertiesCfg(),
             visual_material=sim_utils.PreviewSurfaceCfg(
                 diffuse_color=(0.85, 0.12, 0.12),
@@ -1202,7 +1202,10 @@ class HierarchicalG1Env:
         if self.arm_policy is None:
             return
         # Reset arm policy internal state (smoothing, etc.)
-        self.arm_policy.reset_state()
+        # Pass current arm joint positions so first step blends smoothly
+        # instead of jumping from default pose to policy output
+        current_arm_5 = self.robot.data.joint_pos[:, self._arm_policy_joint_idx]
+        self.arm_policy.reset_state(current_targets=current_arm_5)
         # Compute current EE position
         ee_world, _ = self._compute_palm_ee()
         root_pos = self.robot.data.root_pos_w
