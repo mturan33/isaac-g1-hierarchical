@@ -324,6 +324,7 @@ class HierarchicalSceneCfg(InteractiveSceneCfg):
         ),
         init_state=RigidObjectCfg.InitialStateCfg(
             pos=(3.5, 0.0, -0.2),
+            rot=(0.7071, 0.0, 0.0, 0.7071),  # 90 deg around Z
         ),
     )
 
@@ -349,14 +350,17 @@ class HierarchicalSceneCfg(InteractiveSceneCfg):
     # -- Table 2: Table with yellow box (kasa), 2m behind robot --
     # table_with_yellowbox USD: has built-in yellow box for placing objects
     # Surface at ~z=0.82 when spawned at z=-0.2
-    table2: RigidObjectCfg = RigidObjectCfg(
+    # NOTE: Uses AssetBaseCfg (not RigidObjectCfg) because the USD has
+    # instanced prims that prevent RigidBodyAPI from being applied.
+    # Position is tracked via StaticObjectProxy in the env.
+    table2 = AssetBaseCfg(
         prim_path="{ENV_REGEX_NS}/Table2",
         spawn=sim_utils.UsdFileCfg(
             usd_path="C:/IsaacLab/source/isaaclab_tasks/isaaclab_tasks/direct/unitree_sim_isaaclab/assets/objects/table_with_yellowbox.usd",
-            rigid_props=sim_utils.RigidBodyPropertiesCfg(kinematic_enabled=True),
         ),
-        init_state=RigidObjectCfg.InitialStateCfg(
+        init_state=AssetBaseCfg.InitialStateCfg(
             pos=(-2.0, 0.0, -0.2),
+            rot=(0.7071, 0.0, 0.0, 0.7071),  # 90 deg around Z
         ),
     )
 
@@ -368,6 +372,35 @@ class HierarchicalSceneCfg(InteractiveSceneCfg):
             texture_file=f"{ISAAC_NUCLEUS_DIR}/Materials/Textures/Skies/PolyHaven/kloofendal_43d_clear_puresky_4k.hdr",
         ),
     )
+
+
+# =============================================================================
+# Static object proxy (for USD assets without RigidBodyAPI)
+# =============================================================================
+
+class StaticObjectProxy:
+    """Lightweight proxy that mimics RigidObject.data.root_pos_w for static objects.
+
+    Used for USD assets (like table_with_yellowbox) that have instanced prims
+    and cannot use RigidObjectCfg. Since the object is static, we compute
+    per-env positions from scene env_origins + init_state.
+
+    Attributes:
+        data: Namespace with root_pos_w [num_envs, 3] tensor.
+    """
+
+    class _Data:
+        def __init__(self, positions: torch.Tensor):
+            self.root_pos_w = positions
+
+    def __init__(self, init_pos: tuple, env_origins: torch.Tensor, device: str):
+        pos = torch.tensor(init_pos, dtype=torch.float32, device=device)
+        world_pos = env_origins + pos.unsqueeze(0)
+        self.data = self._Data(world_pos)
+
+    def reset(self, indices):
+        """No-op: static objects don't need reset."""
+        pass
 
 
 # =============================================================================
@@ -424,8 +457,13 @@ class HierarchicalG1Env:
         # -- Get entity handles --
         self.robot: Articulation = self.scene["robot"]
         self.table: RigidObject = self.scene["table"]
-        self.table2: RigidObject = self.scene["table2"]
         self.cup: RigidObject = self.scene["cup"]
+        # table2 uses AssetBaseCfg (no RigidBodyAPI) — proxy provides .data.root_pos_w
+        self.table2 = StaticObjectProxy(
+            init_pos=(-2.0, 0.0, -0.2),
+            env_origins=self.scene.env_origins,
+            device=device,
+        )
 
         # -- Load V6.2 locomotion policy --
         from ..low_level.policy_wrapper import LocomotionPolicy
