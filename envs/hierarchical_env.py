@@ -340,10 +340,13 @@ class HierarchicalSceneCfg(InteractiveSceneCfg):
         spawn=sim_utils.UsdFileCfg(
             usd_path=f"{ISAACLAB_NUCLEUS_DIR}/Mimic/pick_place_task/pick_place_assets/steering_wheel.usd",
             scale=(0.75, 0.75, 0.75),
-            rigid_props=sim_utils.RigidBodyPropertiesCfg(),
+            rigid_props=sim_utils.RigidBodyPropertiesCfg(
+                linear_damping=10.0,  # High damping to resist being pushed
+                max_linear_velocity=0.5,  # Limit velocity
+            ),
         ),
         init_state=RigidObjectCfg.InitialStateCfg(
-            pos=(2.75, -0.10, 0.70),
+            pos=(2.60, -0.10, 0.72),  # Near front edge of table, reachable
         ),
     )
 

@@ -30,7 +30,7 @@ except ImportError:
 
 
 # Available skills for validation
-AVAILABLE_SKILLS = {"walk_to", "reach", "grasp", "place", "walk_to_position"}
+AVAILABLE_SKILLS = {"walk_to", "reach", "grasp", "lift", "lateral_walk", "place", "walk_to_position"}
 
 
 class VLMPlanner:
@@ -112,10 +112,12 @@ class VLMPlanner:
         return f"""You are a robot task planner for a Unitree G1 humanoid robot.
 
 AVAILABLE SKILLS:
-- walk_to(target, stop_distance): Walk to an object/surface. stop_distance is how far from the target to stop (meters). Robot arm workspace is 0.32m, so stop_distance should be 0.20-0.30m for grasping.
-- reach(target): Extend right arm toward target object using RL policy. Target must be within 0.32m reach.
+- walk_to(target, stop_distance): Walk to an object/surface. stop_distance is how far from the target to stop (meters).
+- reach(target): Extend right arm toward target object using RL policy + magnetic attach.
 - grasp(): Close fingers to grasp object.
-- place(): Open fingers to release held object.
+- lift(): Raise arm above basket/container height after grasping.
+- lateral_walk(direction, distance, speed): Walk sideways while holding object. direction="right"/"left".
+- place(): Open fingers to release held object, return arm to default.
 - walk_to_position(x, y): Walk to specific world coordinates.
 
 ROBOT STATE:
@@ -222,16 +224,26 @@ class SimplePlanner:
             return []
 
     def _plan_pick(self, task: str, objects: list) -> list:
-        """Pick: walk -> reach -> grasp."""
+        """Pick from table and place in basket:
+        walk -> reach -> grasp -> lift -> lateral to basket -> place.
+        """
         target_obj = self._find_target_object(task, objects)
         if target_obj is None:
             print("[SimplePlanner] No graspable object found in scene")
             return []
         return [
-            # 0.20m: close enough for arm reach (0.35m max)
-            {"skill": "walk_to", "params": {"target": target_obj["id"], "stop_distance": 0.20}},
+            # 1. Walk to object (stop 0.30m away to avoid table collision)
+            {"skill": "walk_to", "params": {"target": target_obj["id"], "stop_distance": 0.30}},
+            # 2. Reach and magnetically attach
             {"skill": "reach", "params": {"target": target_obj["id"]}},
+            # 3. Close fingers around object
             {"skill": "grasp", "params": {}},
+            # 4. Lift arm above basket rim height
+            {"skill": "lift", "params": {}},
+            # 5. Sidestep right toward basket (~0.4m)
+            {"skill": "lateral_walk", "params": {"direction": "right", "distance": 0.4, "speed": 0.25}},
+            # 6. Release into basket
+            {"skill": "place", "params": {}},
         ]
 
     def _plan_place(self, task: str, surfaces: list) -> list:

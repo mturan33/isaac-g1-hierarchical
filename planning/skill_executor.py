@@ -3,11 +3,13 @@ Skill Executor
 ================
 Executes a plan (list of skill steps) sequentially on the HierarchicalG1Env.
 
-Reuses the exact control patterns from test_hierarchical.py:
+Skills:
     - walk_to: WalkToSkill with stop_distance, then 50-step stabilize
-    - reach: manipulation mode -> Stage 7 arm policy -> 80-step active reach + hold
-    - grasp: finger_controller.close("both"), 100-step hold
-    - place: finger_controller.open("both"), arm back to default, 200 steps
+    - reach: manipulation mode -> Stage 7 arm policy -> magnetic attach
+    - grasp: finger_controller.close("both"), hold
+    - lift: raise arm above basket height (modify shoulder_pitch)
+    - lateral_walk: sidestep while holding arm position
+    - place: detach object, open fingers, arm back to default
 """
 
 from __future__ import annotations
@@ -31,7 +33,17 @@ class SkillExecutor:
 
     # Right shoulder offset in body frame (from arm_policy_wrapper.py)
     SHOULDER_OFFSET = [0.0, -0.174, 0.259]
-    MAX_REACH = 0.35  # Conservative for Stage 7 (trained at 0.32m), safe OOD extension
+    MAX_REACH = 0.42  # Extended for table-top reach (Stage 7 trained at 0.32m)
+
+    # Arm joint indices within the 14-joint arm group
+    # ARM_JOINT_NAMES order: L_sh_pitch(0), L_sh_roll(1), L_sh_yaw(2), L_elbow(3),
+    #   L_wr_roll(4), L_wr_pitch(5), L_wr_yaw(6),
+    #   R_sh_pitch(7), R_sh_roll(8), R_sh_yaw(9), R_elbow(10),
+    #   R_wr_roll(11), R_wr_pitch(12), R_wr_yaw(13)
+    R_SHOULDER_PITCH = 7
+    R_SHOULDER_ROLL = 8
+    R_SHOULDER_YAW = 9
+    R_ELBOW = 10
 
     def __init__(
         self,
@@ -52,6 +64,8 @@ class SkillExecutor:
             "walk_to": self._execute_walk_to,
             "reach": self._execute_reach,
             "grasp": self._execute_grasp,
+            "lift": self._execute_lift,
+            "lateral_walk": self._execute_lateral_walk,
             "place": self._execute_place,
             "walk_to_position": self._execute_walk_to_position,
         }
@@ -143,28 +157,27 @@ class SkillExecutor:
         env = self.env
 
         if hold_arm and self._hold_arm_targets is not None:
-            # Keep manipulation mode — arm stays at current (grasp) position
+            # Keep manipulation mode -- arm stays at current (grasp) position
             print("  [WalkTo] Holding arm position during walk")
             env.set_manipulation_mode(True)
             env.enable_arm_policy(False)
             arm_targets = self._hold_arm_targets
         else:
-            # Normal walking mode — arm returns to default
+            # Normal walking mode -- arm returns to default
             env.set_manipulation_mode(False)
             arm_targets = None
 
         # Configure WalkTo skill with stop_distance
         walk_cfg = WalkToConfig()
         walk_cfg.stop_distance = stop_distance
-        walk_cfg.max_steps = 4000  # 80s at 50Hz — enough for 180-degree turns
+        walk_cfg.max_steps = 4000  # 80s at 50Hz
         if hold_arm:
-            # Slower, more stable walking when carrying object
             walk_cfg.max_forward_vel = 0.5
-            walk_cfg.max_yaw_rate = 0.8  # Need fast yaw for 180-degree turns
+            walk_cfg.max_yaw_rate = 0.8
             walk_cfg.max_lateral_vel = 0.2
         else:
-            walk_cfg.max_yaw_rate = 0.8  # rad/s — faster turning for large direction changes
-            walk_cfg.max_lateral_vel = 0.4  # m/s — faster lateral correction
+            walk_cfg.max_yaw_rate = 0.8
+            walk_cfg.max_lateral_vel = 0.4
 
         skill = WalkToSkill(config=walk_cfg, device=str(self.device))
         skill.reset(target_positions=target_xy)
@@ -178,13 +191,10 @@ class SkillExecutor:
             vel_cmd, walk_done, result = skill.step(obs)
 
             if arm_targets is not None:
-                # Walk in manipulation mode, holding arm
                 obs = env.step_manipulation(vel_cmd, arm_targets)
             else:
-                # Normal walking mode
                 obs = env.step(vel_cmd)
 
-            # Safety: all robots fell
             if (obs["base_height"] < 0.2).all():
                 return {"status": "failed", "reason": "All robots fell during walk"}
 
@@ -250,20 +260,17 @@ class SkillExecutor:
             return {"status": "failed", "reason": f"Walk failed: {result.reason}"}
 
     # ------------------------------------------------------------------
-    # reach: Extend arm to target using Stage 7 arm policy
+    # reach: Extend arm to target using Stage 7 arm policy + magnetic attach
     # ------------------------------------------------------------------
     def _execute_reach(self, target: str) -> dict:
         """Reach toward a target with the Stage 7 arm policy.
 
-        Strategy (no lift phase - direct reach):
+        Strategy:
         1. Compute reachable target clamped to MAX_REACH from shoulder
-        2. Set arm target and reach directly (no intermediate lift)
-        3. Slow forward lean for first 80 steps to close last cm
-        4. Track EE-to-cup distance, magnetic attach when close
+        2. Apply Z correction to compensate for arm policy Z overshoot
+        3. Set arm target and reach (no forward lean)
+        4. Magnetic attach when EE within 0.30m of object
         5. Hold phase: freeze arm, continue loco for stability
-
-        Debug: prints world coordinates of EE, target, and cup each 10 steps.
-        Draws colored markers if env.enable_debug_markers(True) was called.
         """
         from isaaclab.utils.math import quat_apply_inverse, quat_apply
 
@@ -298,10 +305,10 @@ class SkillExecutor:
         root_pos = env.robot.data.root_pos_w
         root_quat = env.robot.data.root_quat_w
 
-        # Cup in body frame
+        # Object in body frame
         obj_body = quat_apply_inverse(root_quat, obj_pos_all - root_pos)
 
-        # Direction from shoulder to cup
+        # Direction from shoulder to object
         obj_from_shoulder = obj_body - shoulder_offset.unsqueeze(0)
         dist_from_shoulder = obj_from_shoulder.norm(dim=-1, keepdim=True)
 
@@ -313,28 +320,24 @@ class SkillExecutor:
         print(f"  [Reach]   Shoulder:     [{shoulder_offset[0]:.3f}, {shoulder_offset[1]:.3f}, {shoulder_offset[2]:.3f}]")
         print(f"  [Reach]   Dist from shoulder: {dist_from_shoulder.mean():.3f}m (max: {self.MAX_REACH}m)")
 
-        # Clamp XY distance only, preserve cup Z height
-        # Old approach: spherical clamping raised the target above the cup
-        # New approach: clamp only the horizontal (XY) component from shoulder,
-        # keep Z at the actual object height in body frame
-        obj_from_shoulder_xy = obj_from_shoulder[:, :2]  # [N, 2] XY only
-        dist_xy = obj_from_shoulder_xy.norm(dim=-1, keepdim=True)  # [N, 1]
+        # Clamp XY distance from shoulder, preserve Z
+        obj_from_shoulder_xy = obj_from_shoulder[:, :2]
+        dist_xy = obj_from_shoulder_xy.norm(dim=-1, keepdim=True)
         scale_xy = torch.clamp(self.MAX_REACH / (dist_xy + 1e-6), max=1.0)
 
         reachable_target_body = torch.zeros_like(obj_body)
-        # XY: clamp from shoulder
         reachable_target_body[:, :2] = shoulder_offset[:2].unsqueeze(0) + obj_from_shoulder_xy * scale_xy
-        # Z: keep at ACTUAL object height (don't let clamping raise it)
-        reachable_target_body[:, 2] = obj_body[:, 2]
+        # Z: lower by 0.10m to compensate for arm policy Z overshoot
+        reachable_target_body[:, 2] = obj_body[:, 2] - 0.10
 
-        # If cup is within MAX_REACH, target IS the cup
         clamped = (dist_xy.mean() > self.MAX_REACH)
         if clamped:
-            print(f"  [Reach] Target XY CLAMPED: {dist_xy.mean():.3f}m -> {self.MAX_REACH}m (Z kept at object height)")
+            print(f"  [Reach] Target XY CLAMPED: {dist_xy.mean():.3f}m -> {self.MAX_REACH}m")
         else:
             print(f"  [Reach] Target within reach, using actual object position")
 
         print(f"  [Reach]   Reachable body: [{reachable_target_body[0,0]:.3f}, {reachable_target_body[0,1]:.3f}, {reachable_target_body[0,2]:.3f}]")
+        print(f"  [Reach]   (Z lowered by 0.10m to compensate for overshoot)")
 
         # Convert to world frame and set as arm target
         reachable_target_world = quat_apply(root_quat, reachable_target_body) + root_pos
@@ -343,12 +346,7 @@ class SkillExecutor:
         env.set_arm_target_world(reachable_target_world)
         env.reset_arm_policy_state()
 
-        # Slow forward lean velocity: 0.15 m/s helps close the last few cm
-        lean_cmd = torch.zeros(env.num_envs, 3, device=self.device)
-        lean_cmd[:, 0] = 0.15  # slow forward
-
-        # Active reaching (160 steps: 100 with lean + 60 stabilize)
-        # Extra steps needed because smooth_alpha=0.6 makes convergence slower
+        # Stand still during reach (no forward lean -- object on table)
         reach_steps = 160
         best_obj_dist = float('inf')
         best_ee_dist = float('inf')
@@ -359,9 +357,7 @@ class SkillExecutor:
             if not self._is_running():
                 break
 
-            # Use lean velocity for first 100 steps, then stand still to stabilize
-            cmd = lean_cmd if step < 100 else self._stand_cmd
-            obs = env.step_arm_policy(cmd)
+            obs = env.step_arm_policy(self._stand_cmd)
 
             # Track distances using LIVE positions
             ee_world, _ = env._compute_palm_ee()
@@ -374,22 +370,19 @@ class SkillExecutor:
             if step % 10 == 0:
                 h = obs["base_height"].mean().item()
                 standing = (obs["base_height"] > 0.5).sum().item()
-                # Detailed debug with world coordinates
                 print(f"  [Reach] Step {step:3d} | h={h:.2f} | "
                       f"stand={standing}/{env.num_envs} | "
                       f"EE->tgt={ee_dist:.3f} | EE->obj={obj_dist:.3f} | "
                       f"EE=[{ee_world[0,0]:.2f},{ee_world[0,1]:.2f},{ee_world[0,2]:.2f}] "
                       f"Obj=[{live_obj_pos[0,0]:.2f},{live_obj_pos[0,1]:.2f},{live_obj_pos[0,2]:.2f}]")
 
-            # Try magnetic attach as soon as EE is close enough
-            # 0.15m trigger: cup attaches when hand is very close
-            if not attached_during_reach and obj_dist < 0.15:
-                attached_during_reach = env.attach_object_to_hand(max_dist=0.20)
+            # Magnetic attach: 0.30m trigger, 0.40m max_dist
+            if not attached_during_reach and obj_dist < 0.30:
+                attached_during_reach = env.attach_object_to_hand(max_dist=0.40)
                 if attached_during_reach:
                     print(f"  [Reach] ** Magnetic attach at step {step}! **")
                     break
 
-            # Early success: EE is very close to actual cup
             if obj_dist < 0.06:
                 print(f"  [Reach] ** Early success! EE->obj: {obj_dist:.3f}m **")
                 break
@@ -397,11 +390,11 @@ class SkillExecutor:
         print(f"  [Reach] Best EE->target: {best_ee_dist:.3f}m, Best EE->obj: {best_obj_dist:.3f}m")
 
         # Hold phase: freeze arm, continue loco for stability
-        print("  [Reach] Holding arm position (80 steps)...")
+        print("  [Reach] Holding arm position (50 steps)...")
         env.enable_arm_policy(False)
         self._hold_arm_targets = env.robot.data.joint_pos[:, env._arm_idx].clone()
 
-        for step in range(80):
+        for step in range(50):
             if not self._is_running():
                 break
             obs = env.step_manipulation(self._stand_cmd, self._hold_arm_targets)
@@ -409,24 +402,17 @@ class SkillExecutor:
         # Final distance check
         ee_world, _ = env._compute_palm_ee()
         live_obj_pos = env.pickup_obj.data.root_pos_w
-        final_ee_dist = (ee_world - env._arm_target_world).norm(dim=-1).mean().item()
         final_obj_dist = (ee_world - live_obj_pos).norm(dim=-1).mean().item()
-        print(f"  [Reach] Final EE->target: {final_ee_dist:.3f}m, EE->obj(live): {final_obj_dist:.3f}m")
-        print(f"  [Reach]   EE final:  [{ee_world[0,0]:.3f}, {ee_world[0,1]:.3f}, {ee_world[0,2]:.3f}]")
-        print(f"  [Reach]   Obj final: [{live_obj_pos[0,0]:.3f}, {live_obj_pos[0,1]:.3f}, {live_obj_pos[0,2]:.3f}]")
+        print(f"  [Reach] Final EE->obj: {final_obj_dist:.3f}m, attached={attached_during_reach}")
 
         return {
             "status": "success",
-            "reason": f"Reached (best cup dist: {best_obj_dist:.3f}m, final: {final_obj_dist:.3f}m)",
-            "best_ee_dist": best_ee_dist,
-            "best_obj_dist": best_obj_dist,
-            "final_ee_dist": final_ee_dist,
-            "obj_dist": final_obj_dist,
+            "reason": f"Reached (best obj dist: {best_obj_dist:.3f}m, attached={attached_during_reach})",
             "attached": attached_during_reach,
         }
 
     # ------------------------------------------------------------------
-    # grasp: Close fingers
+    # grasp: Close fingers + magnetic attach
     # ------------------------------------------------------------------
     def _execute_grasp(self) -> dict:
         """Close fingers and magnetically attach object to palm.
@@ -454,9 +440,9 @@ class SkillExecutor:
                 break
             obs = env.step_manipulation(self._stand_cmd, arm_targets)
 
-        # Magnetic attach: snap object to palm (skip if already attached)
+        # Magnetic attach (skip if already attached)
         if not already_attached:
-            attached = env.attach_object_to_hand(max_dist=0.20)
+            attached = env.attach_object_to_hand(max_dist=0.40)
         else:
             attached = True
 
@@ -467,18 +453,111 @@ class SkillExecutor:
             obs = env.step_manipulation(self._stand_cmd, arm_targets)
 
             if step % 25 == 0:
-                finger_pos = obs["joint_pos_finger"]
                 h = obs["base_height"].mean().item()
-                print(f"  [Grasp] Step {step:4d} | Height: {h:.2f}m | "
-                      f"Finger mean: {finger_pos.mean():.3f} | Attached: {attached}")
+                print(f"  [Grasp] Step {step:4d} | Height: {h:.2f}m | Attached: {attached}")
 
         if attached:
             return {"status": "success", "reason": "Object attached to hand"}
         else:
-            return {"status": "success", "reason": "Fingers closed (object not attached)"}
+            return {"status": "failed", "reason": "Could not attach object (too far)"}
 
     # ------------------------------------------------------------------
-    # place: Open fingers and return arm to default
+    # lift: Raise arm above basket height
+    # ------------------------------------------------------------------
+    def _execute_lift(self) -> dict:
+        """Lift the held object above basket height by adjusting arm joints.
+
+        Modifies right shoulder pitch and elbow to raise the hand.
+        Interpolates smoothly over 80 steps to avoid destabilizing the robot.
+        """
+        env = self.env
+
+        if self._hold_arm_targets is None:
+            return {"status": "failed", "reason": "No arm targets to lift from"}
+
+        start_targets = self._hold_arm_targets.clone()
+        lift_targets = self._hold_arm_targets.clone()
+
+        # Set lifted position for right arm:
+        # shoulder_pitch ~0.1 (raised above horizontal)
+        # shoulder_roll stays (keep arm to the side)
+        # elbow ~0.5 (slightly bent to keep object forward)
+        lift_targets[:, self.R_SHOULDER_PITCH] = 0.10
+        lift_targets[:, self.R_ELBOW] = 0.50
+
+        print(f"  [Lift] Raising arm: shoulder_pitch -> 0.10, elbow -> 0.50")
+
+        # Smoothly interpolate over 80 steps
+        for step in range(80):
+            if not self._is_running():
+                break
+            alpha = min(1.0, step / 50.0)  # Ramp over 50 steps
+            interp = start_targets * (1 - alpha) + lift_targets * alpha
+            obs = env.step_manipulation(self._stand_cmd, interp)
+
+            if step % 20 == 0:
+                h = obs["base_height"].mean().item()
+                ee_world, _ = env._compute_palm_ee()
+                print(f"  [Lift] Step {step:3d} | h={h:.2f} | "
+                      f"EE z={ee_world[0,2]:.3f} | alpha={alpha:.2f}")
+
+        self._hold_arm_targets = lift_targets.clone()
+
+        # Final EE height
+        ee_world, _ = env._compute_palm_ee()
+        print(f"  [Lift] Final EE: [{ee_world[0,0]:.3f}, {ee_world[0,1]:.3f}, {ee_world[0,2]:.3f}]")
+
+        return {"status": "success", "reason": f"Lifted to EE z={ee_world[0,2].item():.3f}m"}
+
+    # ------------------------------------------------------------------
+    # lateral_walk: Sidestep while holding arm position
+    # ------------------------------------------------------------------
+    def _execute_lateral_walk(self, direction: str = "right", distance: float = 0.4, speed: float = 0.25) -> dict:
+        """Walk laterally while holding the arm in position.
+
+        Args:
+            direction: "right" or "left" (robot's perspective)
+            distance: meters to walk sideways
+            speed: lateral velocity (m/s)
+        """
+        env = self.env
+
+        if self._hold_arm_targets is None:
+            return {"status": "failed", "reason": "No arm targets held"}
+
+        # Lateral velocity command (negative Y = right in body frame)
+        vy = -speed if direction == "right" else speed
+        lateral_cmd = torch.zeros(env.num_envs, 3, device=self.device)
+        lateral_cmd[:, 1] = vy
+
+        # Steps: distance / speed / control_dt
+        steps = int(distance / speed / 0.02)  # 0.02s per step at 50Hz
+
+        print(f"  [Lateral] Walking {direction} {distance}m at {speed}m/s ({steps} steps)")
+
+        for step in range(steps):
+            if not self._is_running():
+                break
+            obs = env.step_manipulation(lateral_cmd, self._hold_arm_targets)
+
+            if step % 50 == 0:
+                h = obs["base_height"].mean().item()
+                standing = (obs["base_height"] > 0.5).sum().item()
+                ee_world, _ = env._compute_palm_ee()
+                print(f"  [Lateral] Step {step}/{steps} | h={h:.2f} | "
+                      f"stand={standing}/{env.num_envs} | "
+                      f"EE=[{ee_world[0,0]:.2f},{ee_world[0,1]:.2f},{ee_world[0,2]:.2f}]")
+
+        # Brief stabilize
+        for _ in range(30):
+            if not self._is_running():
+                break
+            obs = env.step_manipulation(self._stand_cmd, self._hold_arm_targets)
+
+        return {"status": "success", "reason": f"Walked {direction} ~{distance}m"}
+
+    # ------------------------------------------------------------------
+    # place: Release object, open fingers, return arm to default
     # ------------------------------------------------------------------
     def _execute_place(self) -> dict:
         """Detach object, open fingers, return arm to default.
