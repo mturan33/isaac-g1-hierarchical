@@ -315,9 +315,10 @@ class HierarchicalSceneCfg(InteractiveSceneCfg):
         },
     )
 
-    # -- PackingTable: 3m ahead, matching PickPlace-Locomanipulation-G1 env --
+    # -- PackingTable: 3m ahead, rotated 90deg CW around Z --
     # PackingTable USD: surface ~z=0.70 when spawned at z=-0.3, has built-in basket
-    # No rotation (matching reference env layout)
+    # 90deg CW (-90deg) rotation: quat wxyz = (cos(-45), 0, 0, sin(-45)) = (0.7071, 0, 0, -0.7071)
+    # Basket faces near side (toward robot), open end faces away
     table: RigidObjectCfg = RigidObjectCfg(
         prim_path="{ENV_REGEX_NS}/Table",
         spawn=sim_utils.UsdFileCfg(
@@ -326,13 +327,14 @@ class HierarchicalSceneCfg(InteractiveSceneCfg):
         ),
         init_state=RigidObjectCfg.InitialStateCfg(
             pos=(3.0, 0.0, -0.3),
+            rot=(0.7071, 0.0, 0.0, -0.7071),
         ),
     )
 
-    # -- Steering wheel on table (matching PickPlace-Locomanipulation-G1 env) --
-    # Position: near front edge of table, within robot's approach path
-    # Reference: table at (0,0.55,-0.3), object at (-0.35,0.45,0.70)
-    # Our table at (3.0,0,-0.3), object offset (-0.35,-0.10,+1.0) from table
+    # -- Steering wheel on table (near front edge, right-arm reachable) --
+    # Table rotated 90deg CW: narrow end faces robot, long axis along Y
+    # Place near the front edge (x=2.75), slightly right of center (y=-0.10)
+    # Table surface extends roughly x=[2.6, 3.4], y=[-0.85, 0.85]
     pickup_object: RigidObjectCfg = RigidObjectCfg(
         prim_path="{ENV_REGEX_NS}/Object",
         spawn=sim_utils.UsdFileCfg(
@@ -341,7 +343,7 @@ class HierarchicalSceneCfg(InteractiveSceneCfg):
             rigid_props=sim_utils.RigidBodyPropertiesCfg(),
         ),
         init_state=RigidObjectCfg.InitialStateCfg(
-            pos=(2.65, -0.10, 0.70),
+            pos=(2.75, -0.10, 0.70),
         ),
     )
 
