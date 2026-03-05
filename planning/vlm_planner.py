@@ -227,7 +227,10 @@ class SimplePlanner:
 
     def _plan_pick(self, task: str, objects: list) -> list:
         """Pick from table and place in basket:
-        walk -> reach -> grasp -> lift -> lower into basket -> place.
+        walk -> pre_reach -> reach -> grasp -> lift -> lateral_walk -> lower -> place.
+
+        Pre_reach raises arm above object to avoid table collision.
+        Lateral_walk moves robot sideways to position above basket.
         """
         target_obj = self._find_target_object(task, objects)
         if target_obj is None:
@@ -236,15 +239,19 @@ class SimplePlanner:
         return [
             # 1. Walk to object (stop 0.30m away to avoid table collision)
             {"skill": "walk_to", "params": {"target": target_obj["id"], "stop_distance": 0.30}},
-            # 2. Reach and magnetically attach (10cm threshold)
+            # 2. Raise arm above object (intermediate target to avoid table)
+            {"skill": "pre_reach", "params": {"target": target_obj["id"]}},
+            # 3. Reach down to object and magnetically attach (10cm threshold)
             {"skill": "reach", "params": {"target": target_obj["id"]}},
-            # 3. Close fingers around object
+            # 4. Close fingers around object
             {"skill": "grasp", "params": {}},
-            # 4. Lift arm above basket rim height (+ move toward basket)
+            # 5. Lift arm straight up above basket height
             {"skill": "lift", "params": {}},
-            # 5. Lower arm into basket
+            # 6. Walk sideways right toward basket
+            {"skill": "lateral_walk", "params": {"direction": "right", "distance": 0.4, "speed": 0.10}},
+            # 7. Lower arm into basket
             {"skill": "lower", "params": {}},
-            # 6. Release into basket
+            # 8. Release into basket
             {"skill": "place", "params": {}},
         ]
 
