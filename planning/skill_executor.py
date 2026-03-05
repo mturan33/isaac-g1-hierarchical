@@ -61,6 +61,9 @@ class SkillExecutor:
 
         self._stand_cmd = torch.zeros(env.num_envs, 3, device=self.device)
         self._hold_arm_targets: Optional[torch.Tensor] = None
+        # Persistent PID hold position (shared across skills)
+        self._hold_pos_xy: Optional[torch.Tensor] = None
+        self._hold_yaw: Optional[torch.Tensor] = None
 
         # Skill dispatch table
         self._skills = {
@@ -462,10 +465,13 @@ class SkillExecutor:
         env.set_arm_target_world(reachable_target_world)
         env.reset_arm_policy_state()
 
-        # Save hold position -- PID will maintain robot here during reach
+        # Save hold position -- PID will maintain robot here during reach + grasp + lift
         # This counteracts arm policy reaction forces that push robot backward
+        # Persists across skills so grasp/lift can reuse it
         hold_pos_xy = root_pos[:, :2].clone()
         hold_yaw = get_yaw_from_quat(root_quat).clone()
+        self._hold_pos_xy = hold_pos_xy
+        self._hold_yaw = hold_yaw
         print(f"  [Reach] Hold position: [{hold_pos_xy[0,0]:.3f}, {hold_pos_xy[0,1]:.3f}], yaw={hold_yaw[0]:.3f}")
 
         # PID position holding during reach
@@ -508,15 +514,20 @@ class SkillExecutor:
 
         print(f"  [Reach] Best EE->target: {best_ee_dist:.3f}m, Best EE->obj: {best_obj_dist:.3f}m")
 
-        # Hold phase: freeze arm, continue loco for stability
-        print("  [Reach] Holding arm position (50 steps)...")
+        # Hold phase: freeze arm, PID hold position for stability
+        print("  [Reach] Holding arm position (50 steps) with PID hold...")
         env.enable_arm_policy(False)
         self._hold_arm_targets = env.robot.data.joint_pos[:, env._arm_idx].clone()
 
         for step in range(50):
             if not self._is_running():
                 break
-            obs = env.step_manipulation(self._stand_cmd, self._hold_arm_targets)
+            hold_cmd, drift = self._compute_hold_cmd(hold_pos_xy, hold_yaw)
+            obs = env.step_manipulation(hold_cmd, self._hold_arm_targets)
+            if step % 25 == 0:
+                h = obs["base_height"].mean().item()
+                standing = (obs["base_height"] > 0.5).sum().item()
+                print(f"  [Reach] Hold {step}/50 | h={h:.2f} | stand={standing}/{env.num_envs} | drift={drift:.3f}")
 
         # Final distance check
         ee_world, _ = env._compute_palm_ee()
@@ -540,6 +551,7 @@ class SkillExecutor:
         2. Try magnetic attach (snap object to palm if close enough)
            - Skipped if already attached during reach phase
         3. Hold for 50 steps to stabilize
+        Uses PID hold to prevent robot from tipping (arm+object shift CoM).
         """
         env = self.env
         env.finger_controller.close(hand="both")
@@ -548,16 +560,28 @@ class SkillExecutor:
         if arm_targets is None:
             arm_targets = env.robot.data.joint_pos[:, env._arm_idx].clone()
 
+        # Use persistent hold position from reach (or compute new one)
+        hold_pos_xy = self._hold_pos_xy
+        hold_yaw = self._hold_yaw
+        if hold_pos_xy is None:
+            root_pos = env.robot.data.root_pos_w
+            root_quat = env.robot.data.root_quat_w
+            hold_pos_xy = root_pos[:, :2].clone()
+            hold_yaw = get_yaw_from_quat(root_quat).clone()
+            self._hold_pos_xy = hold_pos_xy
+            self._hold_yaw = hold_yaw
+
         # Check if already attached during reach
         already_attached = getattr(env, '_object_attached', False)
         if already_attached:
             print("  [Grasp] Object already attached from reach phase")
 
-        # Close fingers for 30 steps
+        # Close fingers for 30 steps with PID hold
         for step in range(30):
             if not self._is_running():
                 break
-            obs = env.step_manipulation(self._stand_cmd, arm_targets)
+            hold_cmd, drift = self._compute_hold_cmd(hold_pos_xy, hold_yaw)
+            obs = env.step_manipulation(hold_cmd, arm_targets)
 
         # Magnetic attach (skip if already attached)
         if not already_attached:
@@ -565,15 +589,18 @@ class SkillExecutor:
         else:
             attached = True
 
-        # Hold for 50 more steps
+        # Hold for 50 more steps with PID hold
         for step in range(50):
             if not self._is_running():
                 break
-            obs = env.step_manipulation(self._stand_cmd, arm_targets)
+            hold_cmd, drift = self._compute_hold_cmd(hold_pos_xy, hold_yaw)
+            obs = env.step_manipulation(hold_cmd, arm_targets)
 
             if step % 25 == 0:
                 h = obs["base_height"].mean().item()
-                print(f"  [Grasp] Step {step:4d} | Height: {h:.2f}m | Attached: {attached}")
+                standing = (obs["base_height"] > 0.5).sum().item()
+                print(f"  [Grasp] Step {step:4d} | h={h:.2f} | stand={standing}/{env.num_envs} | "
+                      f"drift={drift:.3f} | Attached: {attached}")
 
         if attached:
             return {"status": "success", "reason": "Object attached to hand"}
