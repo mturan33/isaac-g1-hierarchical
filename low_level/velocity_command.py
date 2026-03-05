@@ -302,7 +302,9 @@ class AdaptivePIDWalkController:
         vx_raw = pid_dist * heading_alignment
         vx = torch.where(
             turning_phase,
-            torch.zeros_like(vx_raw),  # Don't walk forward during turn
+            # Small forward velocity during turn to prevent backward drift
+            # (loco policy drifts backward during pure turning, causing outward spiral)
+            torch.full_like(vx_raw, 0.1),
             torch.clamp(vx_raw, -self.max_lin_vel_x, self.max_lin_vel_x),
         )
 
@@ -324,8 +326,8 @@ class AdaptivePIDWalkController:
             old_dist = self._dist_history[-self.stall_window]
             new_dist = self._dist_history[-1]
             progress = old_dist - new_dist
-            if progress < self.stall_threshold and not turning_phase.all():
-                # Stalled! Boost forward velocity
+            if progress < self.stall_threshold:
+                # Stalled! Boost forward velocity (works in all phases)
                 self._stall_boost = torch.clamp(
                     self._stall_boost + 0.02, 0, 0.4
                 )
@@ -339,13 +341,8 @@ class AdaptivePIDWalkController:
         vx = vx * approach_scale
         vy = vy * approach_scale
 
-        # Add stall boost AFTER deceleration so it's not dampened
-        vx = torch.where(
-            ~turning_phase,
-            vx + self._stall_boost,
-            vx,
-        )
-        vx = vx.clamp(-self.max_lin_vel_x, self.max_lin_vel_x)
+        # Add stall boost AFTER deceleration (applies in all phases including turn)
+        vx = (vx + self._stall_boost).clamp(-self.max_lin_vel_x, self.max_lin_vel_x)
 
         # Ensure minimum forward vel when target is ahead and not turning
         vx = torch.where(

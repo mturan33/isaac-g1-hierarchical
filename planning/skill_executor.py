@@ -81,6 +81,51 @@ class SkillExecutor:
             return self.sim_app.is_running()
         return True
 
+    def _compute_hold_cmd(
+        self,
+        hold_pos_xy: torch.Tensor,
+        hold_yaw: torch.Tensor,
+    ) -> tuple[torch.Tensor, float]:
+        """Compute position-correction velocity to keep robot at hold position.
+
+        Used during reach/lift/lower to counteract arm policy reaction forces
+        that would otherwise push the robot backward.
+
+        Args:
+            hold_pos_xy: [num_envs, 2] target XY position to maintain
+            hold_yaw: [num_envs] target heading to maintain
+
+        Returns:
+            hold_cmd: [num_envs, 3] velocity command [vx, vy, vyaw]
+            drift: scalar, mean distance from hold position
+        """
+        env = self.env
+        cur_root_pos = env.robot.data.root_pos_w
+        cur_root_quat = env.robot.data.root_quat_w
+        cur_pos_xy = cur_root_pos[:, :2]
+        cur_yaw = get_yaw_from_quat(cur_root_quat)
+
+        # Position error in world frame (toward hold position)
+        delta_w = hold_pos_xy - cur_pos_xy
+        drift = delta_w.norm(dim=-1).mean().item()
+
+        # Convert to body frame
+        cos_y = torch.cos(cur_yaw)
+        sin_y = torch.sin(cur_yaw)
+        dx_body = cos_y * delta_w[:, 0] + sin_y * delta_w[:, 1]
+        dy_body = -sin_y * delta_w[:, 0] + cos_y * delta_w[:, 1]
+
+        # P-controller: push robot back toward hold position
+        vx = (dx_body * 2.0).clamp(-0.3, 0.3)
+        vy = (dy_body * 1.0).clamp(-0.15, 0.15)
+
+        # Heading hold
+        heading_err = normalize_angle(hold_yaw - cur_yaw)
+        vyaw = (heading_err * 1.5).clamp(-0.3, 0.3)
+
+        hold_cmd = torch.stack([vx, vy, vyaw], dim=-1)
+        return hold_cmd, drift
+
     def execute_plan(self, plan: list) -> dict:
         """Execute a sequence of skill steps.
 
@@ -434,31 +479,8 @@ class SkillExecutor:
             if not self._is_running():
                 break
 
-            # Compute position-correction velocity (PID hold)
-            cur_root_pos = env.robot.data.root_pos_w
-            cur_root_quat = env.robot.data.root_quat_w
-            cur_pos_xy = cur_root_pos[:, :2]
-            cur_yaw = get_yaw_from_quat(cur_root_quat)
-
-            # Position error in world frame (toward hold position)
-            delta_w = hold_pos_xy - cur_pos_xy
-            drift = delta_w.norm(dim=-1).mean().item()
-
-            # Convert to body frame
-            cos_y = torch.cos(cur_yaw)
-            sin_y = torch.sin(cur_yaw)
-            dx_body = cos_y * delta_w[:, 0] + sin_y * delta_w[:, 1]
-            dy_body = -sin_y * delta_w[:, 0] + cos_y * delta_w[:, 1]
-
-            # P-controller: push robot back toward hold position
-            vx = (dx_body * 2.0).clamp(-0.3, 0.3)
-            vy = (dy_body * 1.0).clamp(-0.15, 0.15)
-
-            # Heading hold
-            heading_err = normalize_angle(hold_yaw - cur_yaw)
-            vyaw = (heading_err * 1.5).clamp(-0.3, 0.3)
-
-            hold_cmd = torch.stack([vx, vy, vyaw], dim=-1)
+            # PID hold: counteract arm reaction forces
+            hold_cmd, drift = self._compute_hold_cmd(hold_pos_xy, hold_yaw)
             obs = env.step_arm_policy(hold_cmd)
 
             # Track distances using LIVE positions
@@ -475,7 +497,7 @@ class SkillExecutor:
                 print(f"  [Reach] Step {step:3d} | h={h:.2f} | "
                       f"stand={standing}/{env.num_envs} | "
                       f"EE->obj={obj_dist:.3f} | drift={drift:.3f} | "
-                      f"hold_cmd=[{vx[0]:.2f},{vy[0]:.2f},{vyaw[0]:.2f}]")
+                      f"cmd=[{hold_cmd[0,0]:.2f},{hold_cmd[0,1]:.2f},{hold_cmd[0,2]:.2f}]")
 
             # Magnetic attach: 0.15m trigger (15cm threshold)
             if not attached_during_reach and obj_dist < 0.15:
@@ -602,33 +624,40 @@ class SkillExecutor:
         env.set_arm_target_world(lift_target_world)
         env.reset_arm_policy_state()
 
-        # Run arm policy for 120 steps
+        # Save hold position — PID prevents drift during lift
+        hold_pos_xy = root_pos[:, :2].clone()
+        hold_yaw = get_yaw_from_quat(root_quat).clone()
+        print(f"  [Lift] PID hold at [{hold_pos_xy[0,0]:.3f}, {hold_pos_xy[0,1]:.3f}]")
+
+        # Run arm policy for 120 steps with PID hold
         for step in range(120):
             if not self._is_running():
                 break
-            obs = env.step_arm_policy(self._stand_cmd)
+            hold_cmd, drift = self._compute_hold_cmd(hold_pos_xy, hold_yaw)
+            obs = env.step_arm_policy(hold_cmd)
 
             if step % 20 == 0:
                 ee_now, _ = env._compute_palm_ee()
                 h = obs["base_height"].mean().item()
                 standing = (obs["base_height"] > 0.5).sum().item()
                 print(f"  [Lift] Step {step:3d} | h={h:.2f} | stand={standing}/{env.num_envs} | "
-                      f"EE=[{ee_now[0,0]:.2f},{ee_now[0,1]:.2f},{ee_now[0,2]:.2f}]")
+                      f"drift={drift:.3f} | EE=[{ee_now[0,0]:.2f},{ee_now[0,1]:.2f},{ee_now[0,2]:.2f}]")
 
         # Freeze arm at current position
         env.enable_arm_policy(False)
         self._hold_arm_targets = env.robot.data.joint_pos[:, env._arm_idx].clone()
 
-        # Stabilize after lift — robot squats during arm policy, needs recovery
+        # Stabilize after lift — PID hold continues during stabilization
         print("  [Lift] Stabilizing (100 steps)...")
         for step in range(100):
             if not self._is_running():
                 break
-            obs = env.step_manipulation(self._stand_cmd, self._hold_arm_targets)
+            hold_cmd, drift = self._compute_hold_cmd(hold_pos_xy, hold_yaw)
+            obs = env.step_manipulation(hold_cmd, self._hold_arm_targets)
             if step % 25 == 0:
                 h = obs["base_height"].mean().item()
                 standing = (obs["base_height"] > 0.5).sum().item()
-                print(f"  [Lift] Stabilize {step}/100 | h={h:.2f} | stand={standing}/{env.num_envs}")
+                print(f"  [Lift] Stabilize {step}/100 | h={h:.2f} | stand={standing}/{env.num_envs} | drift={drift:.3f}")
 
         ee_final, _ = env._compute_palm_ee()
         print(f"  [Lift] Final EE: [{ee_final[0,0]:.3f}, {ee_final[0,1]:.3f}, {ee_final[0,2]:.3f}]")
@@ -730,18 +759,23 @@ class SkillExecutor:
         env.set_arm_target_world(lower_target_world)
         env.reset_arm_policy_state()
 
-        # Run arm policy for 80 steps
+        # Save hold position — PID prevents drift during lower
+        hold_pos_xy = root_pos[:, :2].clone()
+        hold_yaw = get_yaw_from_quat(root_quat).clone()
+
+        # Run arm policy for 80 steps with PID hold
         for step in range(80):
             if not self._is_running():
                 break
-            obs = env.step_arm_policy(self._stand_cmd)
+            hold_cmd, drift = self._compute_hold_cmd(hold_pos_xy, hold_yaw)
+            obs = env.step_arm_policy(hold_cmd)
 
             if step % 20 == 0:
                 ee_now, _ = env._compute_palm_ee()
                 h = obs["base_height"].mean().item()
                 standing = (obs["base_height"] > 0.5).sum().item()
                 print(f"  [Lower] Step {step:3d} | h={h:.2f} | stand={standing}/{env.num_envs} | "
-                      f"EE z={ee_now[0,2]:.3f}")
+                      f"drift={drift:.3f} | EE z={ee_now[0,2]:.3f}")
 
         # Freeze arm at current position
         env.enable_arm_policy(False)
