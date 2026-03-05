@@ -249,16 +249,29 @@ def main():
             break
         obs = env.step(stand_cmd)
 
-    print("[Demo] Done. Exiting...")
-    simulation_app.close()
+    print("[Demo] Done.")
 
 
 if __name__ == "__main__":
+    import threading
+
     try:
         main()
     except (SystemExit, KeyboardInterrupt):
         pass
-    finally:
-        # Force exit -- Isaac Sim background threads can prevent clean shutdown
-        import os
+
+    # Force exit with watchdog -- simulation_app.close() hangs on Windows
+    def _force_exit():
+        print("[Demo] Watchdog: forcing exit after timeout")
         os._exit(0)
+
+    timer = threading.Timer(5.0, _force_exit)
+    timer.daemon = True
+    timer.start()
+
+    try:
+        simulation_app.close()
+    except Exception:
+        pass
+
+    os._exit(0)

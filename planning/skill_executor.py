@@ -502,6 +502,17 @@ class SkillExecutor:
             hold_cmd, drift = self._compute_hold_cmd(hold_pos_xy, hold_yaw)
             obs = env.step_arm_policy(hold_cmd)
 
+            # Periodically refresh hold position to prevent stale accumulation.
+            # Without this, 160+ steps of drift make PID corrections enormous
+            # at grasp start (0.5m * kp=1.5 = 0.75m/s clamped to 0.3) -> robot falls
+            if step > 0 and step % 40 == 0:
+                _rp = env.robot.data.root_pos_w
+                _rq = env.robot.data.root_quat_w
+                hold_pos_xy = _rp[:, :2].clone()
+                hold_yaw = get_yaw_from_quat(_rq).clone()
+                self._hold_pos_xy = hold_pos_xy
+                self._hold_yaw = hold_yaw
+
             # Track distances using LIVE positions
             ee_world, _ = env._compute_palm_ee()
             live_obj_pos = env.pickup_obj.data.root_pos_w
@@ -528,19 +539,26 @@ class SkillExecutor:
         print(f"  [Reach] Best EE->target: {best_ee_dist:.3f}m, Best EE->obj: {best_obj_dist:.3f}m")
 
         # Hold phase: freeze arm, PID hold position for stability
-        print("  [Reach] Holding arm position (50 steps) with PID hold...")
+        # Shortened to 25 steps -- less time with destabilizing asymmetric arm load
+        print("  [Reach] Holding arm position (25 steps)...")
         env.enable_arm_policy(False)
         self._hold_arm_targets = env.robot.data.joint_pos[:, env._arm_idx].clone()
 
-        for step in range(50):
+        # Refresh hold position to CURRENT -- prevents fighting accumulated drift
+        hold_pos_xy = env.robot.data.root_pos_w[:, :2].clone()
+        hold_yaw = get_yaw_from_quat(env.robot.data.root_quat_w).clone()
+        self._hold_pos_xy = hold_pos_xy
+        self._hold_yaw = hold_yaw
+
+        for step in range(25):
             if not self._is_running():
                 break
             hold_cmd, drift = self._compute_hold_cmd(hold_pos_xy, hold_yaw)
             obs = env.step_manipulation(hold_cmd, self._hold_arm_targets)
-            if step % 25 == 0:
+            if step % 12 == 0:
                 h = obs["base_height"].mean().item()
                 standing = (obs["base_height"] > 0.5).sum().item()
-                print(f"  [Reach] Hold {step}/50 | h={h:.2f} | stand={standing}/{env.num_envs} | drift={drift:.3f}")
+                print(f"  [Reach] Hold {step}/25 | h={h:.2f} | stand={standing}/{env.num_envs} | drift={drift:.3f}")
 
         # Final distance check
         ee_world, _ = env._compute_palm_ee()
@@ -563,8 +581,8 @@ class SkillExecutor:
         1. Close fingers (visual)
         2. Try magnetic attach (snap object to palm if close enough)
            - Skipped if already attached during reach phase
-        3. Hold for 50 steps to stabilize
-        Uses PID hold to prevent robot from tipping (arm+object shift CoM).
+        3. Brief hold for stability
+        Uses GENTLE PID hold (0.5x) -- robot is vulnerable with extended arm + object.
         """
         env = self.env
         env.finger_controller.close(hand="both")
@@ -573,23 +591,12 @@ class SkillExecutor:
         if arm_targets is None:
             arm_targets = env.robot.data.joint_pos[:, env._arm_idx].clone()
 
-        # Use persistent hold position from reach, but UPDATE if stale
-        # (robot may have drifted during reach hold — stale pos causes PID to fight and destabilize)
-        hold_pos_xy = self._hold_pos_xy
-        hold_yaw = self._hold_yaw
+        # ALWAYS refresh hold position to current -- prevents accumulated drift from
+        # reach phase causing large PID corrections that destabilize the robot
         root_pos = env.robot.data.root_pos_w
         root_quat = env.robot.data.root_quat_w
-        if hold_pos_xy is None:
-            hold_pos_xy = root_pos[:, :2].clone()
-            hold_yaw = get_yaw_from_quat(root_quat).clone()
-        else:
-            # Check drift from stored hold position
-            cur_pos_xy = root_pos[:, :2]
-            drift_check = (hold_pos_xy - cur_pos_xy).norm(dim=-1).mean().item()
-            if drift_check > 0.3:
-                print(f"  [Grasp] Hold position stale (drift={drift_check:.3f}m), updating to current")
-                hold_pos_xy = cur_pos_xy.clone()
-                hold_yaw = get_yaw_from_quat(root_quat).clone()
+        hold_pos_xy = root_pos[:, :2].clone()
+        hold_yaw = get_yaw_from_quat(root_quat).clone()
         self._hold_pos_xy = hold_pos_xy
         self._hold_yaw = hold_yaw
 
@@ -598,11 +605,17 @@ class SkillExecutor:
         if already_attached:
             print("  [Grasp] Object already attached from reach phase")
 
-        # Close fingers for 30 steps with PID hold
-        for step in range(30):
+        h = root_pos[:, 2].mean().item()
+        standing = (root_pos[:, 2] > 0.5).sum().item()
+        print(f"  [Grasp] Start | h={h:.2f} | stand={standing}/{env.num_envs} | "
+              f"hold=[{hold_pos_xy[0,0]:.3f},{hold_pos_xy[0,1]:.3f}]")
+
+        # Close fingers for 20 steps with GENTLE PID hold
+        for step in range(20):
             if not self._is_running():
                 break
             hold_cmd, drift = self._compute_hold_cmd(hold_pos_xy, hold_yaw)
+            hold_cmd *= 0.5  # Gentle -- robot is vulnerable with extended arm
             obs = env.step_manipulation(hold_cmd, arm_targets)
 
         # Magnetic attach (skip if already attached)
@@ -611,18 +624,25 @@ class SkillExecutor:
         else:
             attached = True
 
-        # Hold for 50 more steps with PID hold
-        for step in range(50):
+        # Brief hold (25 steps) with gentle PID -- minimize time in unstable config
+        for step in range(25):
             if not self._is_running():
                 break
             hold_cmd, drift = self._compute_hold_cmd(hold_pos_xy, hold_yaw)
+            hold_cmd *= 0.5  # Gentle corrections
             obs = env.step_manipulation(hold_cmd, arm_targets)
 
-            if step % 25 == 0:
+            if step % 12 == 0:
                 h = obs["base_height"].mean().item()
                 standing = (obs["base_height"] > 0.5).sum().item()
-                print(f"  [Grasp] Step {step:4d} | h={h:.2f} | stand={standing}/{env.num_envs} | "
+                print(f"  [Grasp] Hold {step}/25 | h={h:.2f} | stand={standing}/{env.num_envs} | "
                       f"drift={drift:.3f} | Attached: {attached}")
+
+            # Early stop if majority fell -- no point holding further
+            fallen = (obs["base_height"] < 0.5).sum().item()
+            if fallen > env.num_envs // 2:
+                print(f"  [Grasp] Majority fell ({fallen}/{env.num_envs}), ending grasp early")
+                break
 
         if attached:
             return {"status": "success", "reason": "Object attached to hand"}
