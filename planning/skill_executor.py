@@ -264,20 +264,24 @@ class SkillExecutor:
             return {"status": "failed", "reason": f"Walk failed: {result.reason}"}
 
     # ------------------------------------------------------------------
-    # pre_reach: Raise arm above table to avoid collision (intermediate target)
+    # pre_reach: Raise arm HIGH before walking to table (avoid collision)
     # ------------------------------------------------------------------
-    def _execute_pre_reach(self, target: str) -> dict:
-        """Raise arm to a position ABOVE the target object before reaching.
+    def _execute_pre_reach(self, target: str = "") -> dict:
+        """Raise arm to a HIGH position BEFORE walking to the table.
 
-        This is the intermediate target (ara hedef) that prevents the hand from
-        pushing into the table edge during the forward reach phase.
+        This must happen while the robot is still FAR from the table.
+        The arm is raised to a fixed high body-frame position (not object-relative)
+        so there is no table collision risk.
 
-        Strategy:
-        1. Compute a position directly ABOVE the target object (+0.15m Z)
-        2. Use arm policy to move the hand there (vertical raise)
-        3. Leave arm policy active for seamless transition to reach phase
+        After raising, the arm is FROZEN so walk_to can hold the position
+        while approaching the table with hold_arm=True.
+
+        Body-frame target: [0.25, -0.10, 0.20]
+          - X=0.25: forward (toward table direction)
+          - Y=-0.10: slightly right (toward right arm)
+          - Z=0.20: above shoulder height (~0.97m world, well above table ~0.70m)
         """
-        from isaaclab.utils.math import quat_apply_inverse, quat_apply
+        from isaaclab.utils.math import quat_apply
 
         env = self.env
         if env.arm_policy is None:
@@ -290,50 +294,25 @@ class SkillExecutor:
         env.set_manipulation_mode(True)
         env.enable_arm_policy(True)
 
-        # Get per-env target position
-        self.semantic_map.update()
-        per_env_pos = self.semantic_map.get_per_env_position(target)
-        if per_env_pos is not None:
-            obj_pos_all = per_env_pos
-        else:
-            target_pos = self.semantic_map.get_object_position(target)
-            if target_pos is None:
-                return {"status": "failed", "reason": f"Target '{target}' not found"}
-            obj_pos_all = torch.tensor(
-                [target_pos], dtype=torch.float32, device=self.device,
-            ).expand(env.num_envs, -1)
-
         root_pos = env.robot.data.root_pos_w
         root_quat = env.robot.data.root_quat_w
 
-        # Object position in body frame
-        obj_body = quat_apply_inverse(root_quat, obj_pos_all - root_pos)
-
-        # Intermediate target: ABOVE the object (same XY, Z + 0.15m)
-        # This clears the table surface so the hand doesn't collide
-        shoulder_offset = torch.tensor(self.SHOULDER_OFFSET, device=self.device)
-        pre_target_body = obj_body.clone()
-        pre_target_body[:, 2] += 0.15  # 15cm above the object
-
-        # Clamp to arm workspace
-        from_shoulder = pre_target_body - shoulder_offset.unsqueeze(0)
-        dist = from_shoulder.norm(dim=-1, keepdim=True)
-        scale = torch.clamp(self.MAX_REACH / (dist + 1e-6), max=1.0)
-        pre_target_clamped = shoulder_offset.unsqueeze(0) + from_shoulder * scale
+        # Fixed HIGH position in body frame — well above table height
+        pre_target_body = torch.tensor(
+            [[0.25, -0.10, 0.20]], dtype=torch.float32, device=self.device,
+        ).expand(env.num_envs, -1)
 
         # Convert to world frame
-        pre_target_world = quat_apply(root_quat, pre_target_clamped) + root_pos
+        pre_target_world = quat_apply(root_quat, pre_target_body) + root_pos
 
-        print(f"  [PreReach] Object body:  [{obj_body[0,0]:.3f}, {obj_body[0,1]:.3f}, {obj_body[0,2]:.3f}]")
-        print(f"  [PreReach] Target body:  [{pre_target_clamped[0,0]:.3f}, {pre_target_clamped[0,1]:.3f}, {pre_target_clamped[0,2]:.3f}]")
+        print(f"  [PreReach] Raising arm to HIGH position (body [0.25, -0.10, 0.20])")
         print(f"  [PreReach] Target world: [{pre_target_world[0,0]:.3f}, {pre_target_world[0,1]:.3f}, {pre_target_world[0,2]:.3f}]")
-        print(f"  [PreReach] Dist from shoulder: {dist.mean():.3f}m (max: {self.MAX_REACH}m)")
 
         # Set target and run arm policy
         env.set_arm_target_world(pre_target_world)
         env.reset_arm_policy_state()
 
-        # Run arm policy for 100 steps (raise arm above table)
+        # Run arm policy for 100 steps (raise arm above table height)
         for step in range(100):
             if not self._is_running():
                 break
@@ -346,11 +325,14 @@ class SkillExecutor:
                 print(f"  [PreReach] Step {step:3d} | h={h:.2f} | stand={standing}/{env.num_envs} | "
                       f"EE=[{ee_now[0,0]:.2f},{ee_now[0,1]:.2f},{ee_now[0,2]:.2f}]")
 
-        # Do NOT freeze arm policy — leave it active for seamless reach transition
+        # FREEZE arm at raised position — save targets for hold_arm walk
+        env.enable_arm_policy(False)
+        self._hold_arm_targets = env.robot.data.joint_pos[:, env._arm_idx].clone()
+
         ee_final, _ = env._compute_palm_ee()
         print(f"  [PreReach] Final EE: [{ee_final[0,0]:.3f}, {ee_final[0,1]:.3f}, {ee_final[0,2]:.3f}]")
 
-        return {"status": "success", "reason": f"Arm raised above target (EE z={ee_final[0,2].item():.3f}m)"}
+        return {"status": "success", "reason": f"Arm raised high (EE z={ee_final[0,2].item():.3f}m)"}
 
     # ------------------------------------------------------------------
     # reach: Extend arm to target using Stage 7 arm policy + magnetic attach

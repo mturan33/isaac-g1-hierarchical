@@ -112,12 +112,12 @@ class VLMPlanner:
         return f"""You are a robot task planner for a Unitree G1 humanoid robot.
 
 AVAILABLE SKILLS:
-- walk_to(target, stop_distance): Walk to an object/surface. stop_distance is how far from the target to stop (meters).
-- pre_reach(target): Raise arm above target object to avoid table collision (intermediate target).
-- reach(target): Extend right arm toward target object using RL policy + magnetic attach.
+- pre_reach(target): Raise arm HIGH before approaching table. MUST be called BEFORE walk_to to avoid table collision.
+- walk_to(target, stop_distance, hold_arm): Walk to object/surface. Use hold_arm=true after pre_reach.
+- reach(target): Extend right arm DOWN toward target object using RL policy + magnetic attach at 10cm.
 - grasp(): Close fingers to grasp object.
-- lift(): Raise arm straight up above basket height after grasping (intermediate target).
-- lateral_walk(direction, distance, speed): Walk sideways while holding object. direction="right"/"left". Slow speed for stability.
+- lift(): Raise arm straight up above basket height after grasping.
+- lateral_walk(direction, distance, speed): Walk sideways while holding object. direction="right"/"left". speed=0.10 for stability.
 - lower(): Lower arm into basket/container after positioning above it.
 - place(): Open fingers to release held object, return arm to default.
 - walk_to_position(x, y): Walk to specific world coordinates.
@@ -128,10 +128,10 @@ ROBOT STATE:
 TASK: {task}
 
 IMPORTANT RULES:
-1. Robot must walk close enough to reach (stop_distance=0.20 for grasping)
-2. Arm workspace is only 0.32m - robot MUST be close to the object
-3. Always reach before grasping
-4. Always walk to destination before placing
+1. ALWAYS pre_reach BEFORE walk_to (raise arm before approaching table)
+2. Walk with hold_arm=true after pre_reach, stop_distance=0.15 for grasping
+3. Arm workspace is 0.50m - robot must be close (stop_distance=0.15)
+4. Always reach before grasping
 5. Output ONLY valid JSON
 
 OUTPUT FORMAT (JSON object with "plan" key containing array):
@@ -227,20 +227,20 @@ class SimplePlanner:
 
     def _plan_pick(self, task: str, objects: list) -> list:
         """Pick from table and place in basket:
-        walk -> pre_reach -> reach -> grasp -> lift -> lateral_walk -> lower -> place.
+        pre_reach -> walk(hold_arm) -> reach -> grasp -> lift -> lateral_walk -> lower -> place.
 
-        Pre_reach raises arm above object to avoid table collision.
-        Lateral_walk moves robot sideways to position above basket.
+        Pre_reach raises arm HIGH while still far from table (no collision).
+        Walk approaches with arm held up.  Reach descends from above.
         """
         target_obj = self._find_target_object(task, objects)
         if target_obj is None:
             print("[SimplePlanner] No graspable object found in scene")
             return []
         return [
-            # 1. Walk to object (stop 0.30m away to avoid table collision)
-            {"skill": "walk_to", "params": {"target": target_obj["id"], "stop_distance": 0.30}},
-            # 2. Raise arm above object (intermediate target to avoid table)
+            # 1. Raise arm HIGH before approaching table (avoids collision)
             {"skill": "pre_reach", "params": {"target": target_obj["id"]}},
+            # 2. Walk to object with arm held up (stop 0.15m for close reach)
+            {"skill": "walk_to", "params": {"target": target_obj["id"], "stop_distance": 0.15, "hold_arm": True}},
             # 3. Reach down to object and magnetically attach (10cm threshold)
             {"skill": "reach", "params": {"target": target_obj["id"]}},
             # 4. Close fingers around object
