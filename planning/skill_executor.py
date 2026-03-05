@@ -211,10 +211,23 @@ class SkillExecutor:
 
         if hold_arm and self._hold_arm_targets is not None:
             # Keep manipulation mode -- arm stays at current (grasp) position
-            print("  [WalkTo] Holding arm position during walk")
             env.set_manipulation_mode(True)
             env.enable_arm_policy(False)
             arm_targets = self._hold_arm_targets
+
+            # Detailed arm state logging for diagnostics
+            import math as _math_wt
+            from isaaclab.utils.math import quat_apply_inverse as _qai_wt
+            ee_w, _ = env._compute_palm_ee()
+            r_pos = env.robot.data.root_pos_w
+            r_quat = env.robot.data.root_quat_w
+            ee_b = _qai_wt(r_quat, ee_w - r_pos)
+            r_yaw = get_yaw_from_quat(r_quat)
+            print(f"  [WalkTo] Hold-arm walk | EE world: [{ee_w[0,0]:.3f},{ee_w[0,1]:.3f},{ee_w[0,2]:.3f}] | "
+                  f"EE body: [{ee_b[0,0]:.3f},{ee_b[0,1]:.3f},{ee_b[0,2]:.3f}] | "
+                  f"yaw={_math_wt.degrees(r_yaw[0].item()):.1f}deg")
+            if ee_b[0, 0].item() < 0:
+                print(f"  [WalkTo] WARNING: Arm BEHIND robot (body X={ee_b[0,0]:.3f}). Turning will be difficult!")
         else:
             # Normal walking mode -- arm returns to default
             env.set_manipulation_mode(False)
@@ -674,20 +687,45 @@ class SkillExecutor:
         env.enable_arm_policy(False)
         self._hold_arm_targets = env.robot.data.joint_pos[:, env._arm_idx].clone()
 
+        # Log arm body-frame position at freeze time
+        from isaaclab.utils.math import quat_apply_inverse as _qai_lift
+        ee_freeze, _ = env._compute_palm_ee()
+        root_pos_f = env.robot.data.root_pos_w
+        root_quat_f = env.robot.data.root_quat_w
+        ee_body_freeze = _qai_lift(root_quat_f, ee_freeze - root_pos_f)
+        cur_yaw_freeze = get_yaw_from_quat(root_quat_f)
+        import math as _math
+        print(f"  [Lift] ARM FROZEN | EE world: [{ee_freeze[0,0]:.3f},{ee_freeze[0,1]:.3f},{ee_freeze[0,2]:.3f}] | "
+              f"EE body: [{ee_body_freeze[0,0]:.3f},{ee_body_freeze[0,1]:.3f},{ee_body_freeze[0,2]:.3f}] | "
+              f"yaw={_math.degrees(cur_yaw_freeze[0].item()):.1f}deg")
+
         # Stabilize after lift — PID hold continues during stabilization
-        print("  [Lift] Stabilizing (100 steps)...")
-        for step in range(100):
+        # Reduced to 30 steps to limit yaw drift with asymmetric load
+        print("  [Lift] Stabilizing (30 steps)...")
+        for step in range(30):
             if not self._is_running():
                 break
             hold_cmd, drift = self._compute_hold_cmd(hold_pos_xy, hold_yaw)
             obs = env.step_manipulation(hold_cmd, self._hold_arm_targets)
-            if step % 25 == 0:
+            if step % 15 == 0:
                 h = obs["base_height"].mean().item()
                 standing = (obs["base_height"] > 0.5).sum().item()
-                print(f"  [Lift] Stabilize {step}/100 | h={h:.2f} | stand={standing}/{env.num_envs} | drift={drift:.3f}")
+                print(f"  [Lift] Stabilize {step}/30 | h={h:.2f} | stand={standing}/{env.num_envs} | drift={drift:.3f}")
 
+        # Log arm body-frame position AFTER stabilization to detect drift
         ee_final, _ = env._compute_palm_ee()
-        print(f"  [Lift] Final EE: [{ee_final[0,0]:.3f}, {ee_final[0,1]:.3f}, {ee_final[0,2]:.3f}]")
+        root_pos_s = env.robot.data.root_pos_w
+        root_quat_s = env.robot.data.root_quat_w
+        ee_body_final = _qai_lift(root_quat_s, ee_final - root_pos_s)
+        cur_yaw_final = get_yaw_from_quat(root_quat_s)
+        yaw_drift_deg = _math.degrees(cur_yaw_final[0].item() - cur_yaw_freeze[0].item())
+        print(f"  [Lift] AFTER STAB | EE world: [{ee_final[0,0]:.3f},{ee_final[0,1]:.3f},{ee_final[0,2]:.3f}] | "
+              f"EE body: [{ee_body_final[0,0]:.3f},{ee_body_final[0,1]:.3f},{ee_body_final[0,2]:.3f}] | "
+              f"yaw={_math.degrees(cur_yaw_final[0].item()):.1f}deg (drift={yaw_drift_deg:.1f}deg)")
+
+        # Check if arm ended up behind robot (body X < 0 means behind)
+        if ee_body_final[0, 0].item() < 0:
+            print(f"  [Lift] WARNING: Arm is BEHIND robot! body X={ee_body_final[0,0]:.3f}")
 
         return {"status": "success", "reason": f"Lifted to z={ee_final[0,2].item():.3f}m"}
 

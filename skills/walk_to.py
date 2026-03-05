@@ -21,11 +21,12 @@ Termination:
 
 from __future__ import annotations
 
+import math
 import torch
 from typing import Optional
 
 from .base_skill import BaseSkill, SkillResult, SkillStatus
-from ..low_level.velocity_command import AdaptivePIDWalkController, get_yaw_from_quat
+from ..low_level.velocity_command import AdaptivePIDWalkController, get_yaw_from_quat, normalize_angle
 from ..config.skill_config import WalkToConfig
 from ..config.joint_config import MIN_BASE_HEIGHT
 
@@ -161,14 +162,37 @@ class WalkToSkill(BaseSkill):
                 final_distance=effective_dist,
             )
 
-        # Log progress periodically
-        if self._step_count % 100 == 0:
+        # Log progress periodically — detailed diagnostics
+        if self._step_count % 50 == 0:
             stall = f", boost={self._pid._stall_boost.mean():.2f}" if self._pid._stall_boost.mean() > 0.01 else ""
             n_standing = standing_mask.sum().item()
+
+            # Compute heading diagnostics
+            delta_w = target - robot_pos_xy
+            target_heading = torch.atan2(delta_w[:, 1], delta_w[:, 0])
+            heading_err = normalize_angle(target_heading - robot_yaw)
+            heading_err_deg = math.degrees(heading_err[0].item())
+            robot_yaw_deg = math.degrees(robot_yaw[0].item())
+            target_heading_deg = math.degrees(target_heading[0].item())
+
+            # Per-env distances for standing robots
+            per_env_dists = ", ".join(
+                f"e{i}={distance[i].item():.2f}{'*' if not standing_mask[i] else ''}"
+                for i in range(min(num_envs, 4))
+            )
+
+            # Turn phase detection
+            is_turning = heading_err[0].abs().item() > self._pid.turn_first_threshold
+            phase = "TURN" if is_turning else "WALK"
+
             print(
                 f"[WalkTo] Step {self._step_count}: "
-                f"dist={effective_dist:.2f}m ({n_standing}/{num_envs} standing), "
-                f"cmd=[{cmd_vel[0,0]:.2f}, {cmd_vel[0,1]:.2f}, {cmd_vel[0,2]:.2f}]"
+                f"dist={effective_dist:.2f}m [{per_env_dists}] | "
+                f"{phase} | "
+                f"yaw={robot_yaw_deg:.0f}deg -> tgt={target_heading_deg:.0f}deg "
+                f"(err={heading_err_deg:.0f}deg) | "
+                f"h={base_height.mean().item():.2f} | "
+                f"cmd=[{cmd_vel[0,0]:.2f},{cmd_vel[0,1]:.2f},{cmd_vel[0,2]:.2f}]"
                 f"{stall}"
             )
 
