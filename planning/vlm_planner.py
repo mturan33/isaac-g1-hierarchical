@@ -30,7 +30,7 @@ except ImportError:
 
 
 # Available skills for validation
-AVAILABLE_SKILLS = {"walk_to", "reach", "grasp", "lift", "lower", "place", "walk_to_position"}
+AVAILABLE_SKILLS = {"walk_to", "pre_reach", "reach", "grasp", "lift", "lateral_walk", "lower", "place", "walk_to_position"}
 
 
 class VLMPlanner:
@@ -113,10 +113,12 @@ class VLMPlanner:
 
 AVAILABLE SKILLS:
 - walk_to(target, stop_distance): Walk to an object/surface. stop_distance is how far from the target to stop (meters).
+- pre_reach(target): Raise arm above target object to avoid table collision (intermediate target).
 - reach(target): Extend right arm toward target object using RL policy + magnetic attach.
 - grasp(): Close fingers to grasp object.
-- lift(): Raise arm above basket/container height after grasping, moves hand up and toward basket.
-- lower(): Lower arm into basket/container after lifting.
+- lift(): Raise arm straight up above basket height after grasping (intermediate target).
+- lateral_walk(direction, distance, speed): Walk sideways while holding object. direction="right"/"left". Slow speed for stability.
+- lower(): Lower arm into basket/container after positioning above it.
 - place(): Open fingers to release held object, return arm to default.
 - walk_to_position(x, y): Walk to specific world coordinates.
 

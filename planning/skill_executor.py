@@ -5,9 +5,11 @@ Executes a plan (list of skill steps) sequentially on the HierarchicalG1Env.
 
 Skills:
     - walk_to: WalkToSkill with stop_distance, then 50-step stabilize
+    - pre_reach: raise arm above table to avoid collision (intermediate target)
     - reach: manipulation mode -> Stage 7 arm policy -> magnetic attach
     - grasp: finger_controller.close("both"), hold
-    - lift: raise arm above basket height using arm policy
+    - lift: raise arm above basket height using arm policy (intermediate target)
+    - lateral_walk: sidestep while holding arm position (slow, stable)
     - lower: lower arm into basket using arm policy
     - place: detach object, open fingers, arm back to default
 """
@@ -33,7 +35,7 @@ class SkillExecutor:
 
     # Right shoulder offset in body frame (from arm_policy_wrapper.py)
     SHOULDER_OFFSET = [0.0, -0.174, 0.259]
-    MAX_REACH = 0.42  # Extended for table-top reach (Stage 7 trained at 0.32m)
+    MAX_REACH = 0.50  # Extended for table-top reach (physical arm ~0.50m)
 
     # Arm joint indices within the 14-joint arm group
     # ARM_JOINT_NAMES order: L_sh_pitch(0), L_sh_roll(1), L_sh_yaw(2), L_elbow(3),
@@ -62,9 +64,11 @@ class SkillExecutor:
         # Skill dispatch table
         self._skills = {
             "walk_to": self._execute_walk_to,
+            "pre_reach": self._execute_pre_reach,
             "reach": self._execute_reach,
             "grasp": self._execute_grasp,
             "lift": self._execute_lift,
+            "lateral_walk": self._execute_lateral_walk,
             "lower": self._execute_lower,
             "place": self._execute_place,
             "walk_to_position": self._execute_walk_to_position,
@@ -260,6 +264,95 @@ class SkillExecutor:
             return {"status": "failed", "reason": f"Walk failed: {result.reason}"}
 
     # ------------------------------------------------------------------
+    # pre_reach: Raise arm above table to avoid collision (intermediate target)
+    # ------------------------------------------------------------------
+    def _execute_pre_reach(self, target: str) -> dict:
+        """Raise arm to a position ABOVE the target object before reaching.
+
+        This is the intermediate target (ara hedef) that prevents the hand from
+        pushing into the table edge during the forward reach phase.
+
+        Strategy:
+        1. Compute a position directly ABOVE the target object (+0.15m Z)
+        2. Use arm policy to move the hand there (vertical raise)
+        3. Leave arm policy active for seamless transition to reach phase
+        """
+        from isaaclab.utils.math import quat_apply_inverse, quat_apply
+
+        env = self.env
+        if env.arm_policy is None:
+            return {"status": "failed", "reason": "No arm policy loaded"}
+
+        # Enable debug visualization markers
+        env.enable_debug_markers(True)
+
+        # Switch to manipulation mode + arm policy
+        env.set_manipulation_mode(True)
+        env.enable_arm_policy(True)
+
+        # Get per-env target position
+        self.semantic_map.update()
+        per_env_pos = self.semantic_map.get_per_env_position(target)
+        if per_env_pos is not None:
+            obj_pos_all = per_env_pos
+        else:
+            target_pos = self.semantic_map.get_object_position(target)
+            if target_pos is None:
+                return {"status": "failed", "reason": f"Target '{target}' not found"}
+            obj_pos_all = torch.tensor(
+                [target_pos], dtype=torch.float32, device=self.device,
+            ).expand(env.num_envs, -1)
+
+        root_pos = env.robot.data.root_pos_w
+        root_quat = env.robot.data.root_quat_w
+
+        # Object position in body frame
+        obj_body = quat_apply_inverse(root_quat, obj_pos_all - root_pos)
+
+        # Intermediate target: ABOVE the object (same XY, Z + 0.15m)
+        # This clears the table surface so the hand doesn't collide
+        shoulder_offset = torch.tensor(self.SHOULDER_OFFSET, device=self.device)
+        pre_target_body = obj_body.clone()
+        pre_target_body[:, 2] += 0.15  # 15cm above the object
+
+        # Clamp to arm workspace
+        from_shoulder = pre_target_body - shoulder_offset.unsqueeze(0)
+        dist = from_shoulder.norm(dim=-1, keepdim=True)
+        scale = torch.clamp(self.MAX_REACH / (dist + 1e-6), max=1.0)
+        pre_target_clamped = shoulder_offset.unsqueeze(0) + from_shoulder * scale
+
+        # Convert to world frame
+        pre_target_world = quat_apply(root_quat, pre_target_clamped) + root_pos
+
+        print(f"  [PreReach] Object body:  [{obj_body[0,0]:.3f}, {obj_body[0,1]:.3f}, {obj_body[0,2]:.3f}]")
+        print(f"  [PreReach] Target body:  [{pre_target_clamped[0,0]:.3f}, {pre_target_clamped[0,1]:.3f}, {pre_target_clamped[0,2]:.3f}]")
+        print(f"  [PreReach] Target world: [{pre_target_world[0,0]:.3f}, {pre_target_world[0,1]:.3f}, {pre_target_world[0,2]:.3f}]")
+        print(f"  [PreReach] Dist from shoulder: {dist.mean():.3f}m (max: {self.MAX_REACH}m)")
+
+        # Set target and run arm policy
+        env.set_arm_target_world(pre_target_world)
+        env.reset_arm_policy_state()
+
+        # Run arm policy for 100 steps (raise arm above table)
+        for step in range(100):
+            if not self._is_running():
+                break
+            obs = env.step_arm_policy(self._stand_cmd)
+
+            if step % 20 == 0:
+                ee_now, _ = env._compute_palm_ee()
+                h = obs["base_height"].mean().item()
+                standing = (obs["base_height"] > 0.5).sum().item()
+                print(f"  [PreReach] Step {step:3d} | h={h:.2f} | stand={standing}/{env.num_envs} | "
+                      f"EE=[{ee_now[0,0]:.2f},{ee_now[0,1]:.2f},{ee_now[0,2]:.2f}]")
+
+        # Do NOT freeze arm policy — leave it active for seamless reach transition
+        ee_final, _ = env._compute_palm_ee()
+        print(f"  [PreReach] Final EE: [{ee_final[0,0]:.3f}, {ee_final[0,1]:.3f}, {ee_final[0,2]:.3f}]")
+
+        return {"status": "success", "reason": f"Arm raised above target (EE z={ee_final[0,2].item():.3f}m)"}
+
+    # ------------------------------------------------------------------
     # reach: Extend arm to target using Stage 7 arm policy + magnetic attach
     # ------------------------------------------------------------------
     def _execute_reach(self, target: str) -> dict:
@@ -267,7 +360,7 @@ class SkillExecutor:
 
         Strategy:
         1. Compute reachable target clamped to MAX_REACH from shoulder
-        2. Set arm target and reach (no forward lean)
+        2. Set arm target and reach (from pre_reach elevated position)
         3. Magnetic attach when EE within 0.10m of object (10cm threshold)
         4. Hold phase: freeze arm, continue loco for stability
         """
@@ -282,6 +375,7 @@ class SkillExecutor:
         env.enable_debug_markers(True)
 
         # Switch to manipulation mode + arm policy
+        # (may already be active from pre_reach — that's fine)
         env.set_manipulation_mode(True)
         env.enable_arm_policy(True)
 
@@ -452,14 +546,14 @@ class SkillExecutor:
             return {"status": "failed", "reason": "Could not attach object (too far)"}
 
     # ------------------------------------------------------------------
-    # lift: Raise arm above basket height using arm policy
+    # lift: Raise arm above basket height using arm policy (intermediate target)
     # ------------------------------------------------------------------
     def _execute_lift(self) -> dict:
-        """Lift the held object above basket height using the arm policy.
+        """Lift the held object STRAIGHT UP above basket height using the arm policy.
 
-        Sets a target position ABOVE and slightly RIGHT of current EE,
+        Sets a target position directly ABOVE current EE (vertical lift),
         then lets the Stage 7 arm policy figure out the joint angles.
-        This is more robust than manual joint angle setting.
+        This is the intermediate target before lateral walk to basket.
         """
         from isaaclab.utils.math import quat_apply_inverse, quat_apply
 
@@ -472,11 +566,10 @@ class SkillExecutor:
         root_pos = env.robot.data.root_pos_w
         root_quat = env.robot.data.root_quat_w
 
-        # Compute lift target in body frame: UP + slightly RIGHT (toward basket)
+        # Compute lift target in body frame: STRAIGHT UP (vertical lift)
         ee_body = quat_apply_inverse(root_quat, ee_world - root_pos)
         lift_body = ee_body.clone()
-        lift_body[:, 1] -= 0.10  # 10cm to the right (body frame -Y = robot's right)
-        lift_body[:, 2] += 0.15  # 15cm up (body frame +Z)
+        lift_body[:, 2] += 0.15  # 15cm straight up (body frame +Z)
 
         # Clamp to arm workspace
         shoulder_offset = torch.tensor(self.SHOULDER_OFFSET, device=self.device)
@@ -517,6 +610,58 @@ class SkillExecutor:
         print(f"  [Lift] Final EE: [{ee_final[0,0]:.3f}, {ee_final[0,1]:.3f}, {ee_final[0,2]:.3f}]")
 
         return {"status": "success", "reason": f"Lifted to z={ee_final[0,2].item():.3f}m"}
+
+    # ------------------------------------------------------------------
+    # lateral_walk: Sidestep while holding arm position (slow, stable)
+    # ------------------------------------------------------------------
+    def _execute_lateral_walk(self, direction: str = "right", distance: float = 0.4, speed: float = 0.10) -> dict:
+        """Walk laterally while holding the arm in lifted position.
+
+        Args:
+            direction: "right" or "left" (robot's perspective)
+            distance: meters to walk sideways
+            speed: lateral velocity (m/s) — default 0.10 for stability
+        """
+        env = self.env
+
+        if self._hold_arm_targets is None:
+            return {"status": "failed", "reason": "No arm targets held"}
+
+        # Lateral velocity command (negative Y = right in body frame)
+        vy = -speed if direction == "right" else speed
+        lateral_cmd = torch.zeros(env.num_envs, 3, device=self.device)
+        lateral_cmd[:, 1] = vy
+
+        # Steps: distance / speed / control_dt
+        steps = int(distance / speed / 0.02)  # 0.02s per step at 50Hz
+
+        print(f"  [Lateral] Walking {direction} {distance}m at {speed}m/s ({steps} steps)")
+
+        for step in range(steps):
+            if not self._is_running():
+                break
+            obs = env.step_manipulation(lateral_cmd, self._hold_arm_targets)
+
+            if step % 50 == 0:
+                h = obs["base_height"].mean().item()
+                standing = (obs["base_height"] > 0.5).sum().item()
+                ee_world, _ = env._compute_palm_ee()
+                print(f"  [Lateral] Step {step}/{steps} | h={h:.2f} | "
+                      f"stand={standing}/{env.num_envs} | "
+                      f"EE=[{ee_world[0,0]:.2f},{ee_world[0,1]:.2f},{ee_world[0,2]:.2f}]")
+
+            # Safety check: stop if robot falls
+            if (obs["base_height"] < 0.5).sum().item() > env.num_envs // 2:
+                print(f"  [Lateral] WARNING: too many robots falling, stopping")
+                break
+
+        # Brief stabilize
+        for _ in range(30):
+            if not self._is_running():
+                break
+            obs = env.step_manipulation(self._stand_cmd, self._hold_arm_targets)
+
+        return {"status": "success", "reason": f"Walked {direction} ~{distance}m"}
 
     # ------------------------------------------------------------------
     # lower: Lower arm into basket using arm policy
