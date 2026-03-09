@@ -233,6 +233,11 @@ class SkillExecutor:
             env.set_manipulation_mode(False)
             arm_targets = None
 
+        # For hold_arm walks, use omnidirectional controller
+        # (much faster than turn-then-walk for nearby targets after lift)
+        if hold_arm and arm_targets is not None:
+            return self._omni_walk_to(target, target_xy, stop_distance, arm_targets)
+
         # Configure WalkTo skill with stop_distance
         walk_cfg = WalkToConfig()
         walk_cfg.stop_distance = stop_distance
@@ -281,6 +286,105 @@ class SkillExecutor:
             return {"status": "success", "reason": f"Reached within {stop_distance}m of {target}"}
         else:
             return {"status": "failed", "reason": f"Walk failed: {result.reason}"}
+
+    # ------------------------------------------------------------------
+    # _omni_walk_to: Omnidirectional walk for hold_arm (nearby targets)
+    # ------------------------------------------------------------------
+    def _omni_walk_to(
+        self,
+        target_name: str,
+        target_xy: torch.Tensor,
+        stop_distance: float,
+        arm_targets: torch.Tensor,
+        max_steps: int = 2000,
+    ) -> dict:
+        """Walk omnidirectionally to target while holding arm position.
+
+        Instead of turn-first-then-walk (which causes orbiting for nearby
+        targets when the robot has rotated during lift), this moves directly
+        toward the target using simultaneous forward, lateral, and yaw
+        velocity commands proportional to body-frame error.
+
+        Used after lift when the robot needs to sidestep to the basket.
+        """
+        env = self.env
+        MIN_H = 0.5
+        start_time = time.time()
+        effective_dist = float('inf')
+        step = 0
+
+        for step in range(max_steps):
+            if not self._is_running():
+                break
+
+            root_pos = env.robot.data.root_pos_w
+            root_quat = env.robot.data.root_quat_w
+            base_h = root_pos[:, 2]
+
+            # Per-env distance, filtered for standing robots
+            delta = target_xy - root_pos[:, :2]
+            dist_per_env = delta.norm(dim=-1)
+            standing_mask = base_h > MIN_H
+            if standing_mask.any():
+                effective_dist = dist_per_env[standing_mask].mean().item()
+            else:
+                effective_dist = dist_per_env.mean().item()
+
+            if effective_dist < stop_distance:
+                break
+
+            # Body-frame direction to target
+            yaw = get_yaw_from_quat(root_quat)
+            cos_y = torch.cos(yaw)
+            sin_y = torch.sin(yaw)
+            dx_body = cos_y * delta[:, 0] + sin_y * delta[:, 1]
+            dy_body = -sin_y * delta[:, 0] + cos_y * delta[:, 1]
+
+            # Proportional velocity commands (forward + lateral simultaneously)
+            vx = (dx_body * 0.8).clamp(-0.25, 0.25)
+            vy = (dy_body * 0.6).clamp(-0.20, 0.20)
+
+            # Gradually face the target (gentle -- not critical for short walks)
+            target_heading = torch.atan2(delta[:, 1], delta[:, 0])
+            heading_err = normalize_angle(target_heading - yaw)
+            vyaw = (heading_err * 0.5).clamp(-0.5, 0.5)
+
+            vel_cmd = torch.stack([vx, vy, vyaw], dim=-1)
+            obs = env.step_manipulation(vel_cmd, arm_targets)
+
+            if step % 50 == 0:
+                h = obs["base_height"].mean().item()
+                stand_count = (obs["base_height"] > MIN_H).sum().item()
+                per_env = ", ".join(
+                    f"e{i}={dist_per_env[i]:.2f}" for i in range(env.num_envs)
+                )
+                print(
+                    f"  [OmniWalk] Step {step} | dist={effective_dist:.2f}m "
+                    f"[{per_env}] | h={h:.2f} | "
+                    f"stand={stand_count}/{env.num_envs} | "
+                    f"cmd=[{vx[0]:.2f},{vy[0]:.2f},{vyaw[0]:.2f}]"
+                )
+
+            if (obs["base_height"] < 0.2).all():
+                return {"status": "failed", "reason": "All robots fell during omni walk"}
+
+        walk_time = time.time() - start_time
+        print(
+            f"  [OmniWalk] Finished in {walk_time:.1f}s, {step + 1} steps, "
+            f"dist={effective_dist:.2f}m"
+        )
+
+        # Stabilize
+        print("  [OmniWalk] Stabilizing...")
+        for _ in range(50):
+            if not self._is_running():
+                break
+            obs = env.step_manipulation(self._stand_cmd, arm_targets)
+
+        if effective_dist < stop_distance:
+            return {"status": "success", "reason": f"Reached within {stop_distance}m of {target_name}"}
+        else:
+            return {"status": "failed", "reason": f"OmniWalk timeout at {effective_dist:.2f}m"}
 
     # ------------------------------------------------------------------
     # walk_to_position: Navigate to specific world coordinates
