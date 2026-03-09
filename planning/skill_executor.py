@@ -634,9 +634,9 @@ class SkillExecutor:
                       f"EE->obj={obj_dist:.3f} | drift={drift:.3f} | "
                       f"cmd=[{hold_cmd[0,0]:.2f},{hold_cmd[0,1]:.2f},{hold_cmd[0,2]:.2f}]")
 
-            # Magnetic attach: 0.10m trigger (10cm — accounts for object geometry)
-            if not attached_during_reach and obj_dist < 0.10:
-                attached_during_reach = env.attach_object_to_hand(max_dist=0.12)
+            # Magnetic attach: 0.20m trigger (arm policy reaches ~19cm reliably)
+            if not attached_during_reach and obj_dist < 0.20:
+                attached_during_reach = env.attach_object_to_hand(max_dist=0.25)
                 if attached_during_reach:
                     print(f"  [Reach] ** Magnetic attach at step {step}! dist={obj_dist:.3f}m **")
                     break
@@ -725,7 +725,7 @@ class SkillExecutor:
 
         # Magnetic attach (skip if already attached)
         if not already_attached:
-            attached = env.attach_object_to_hand(max_dist=0.12)
+            attached = env.attach_object_to_hand(max_dist=0.25)
         else:
             attached = True
 

@@ -180,15 +180,16 @@ class ArmPolicyWrapper:
         """
         return self.net(obs)
 
-    def get_arm_targets(self, obs: torch.Tensor, smooth_alpha: float = 0.2) -> torch.Tensor:
+    def get_arm_targets(self, obs: torch.Tensor, smooth_alpha: float = 0.0) -> torch.Tensor:
         """
         Get absolute joint targets from arm policy.
 
         Args:
             obs: [N, 39] arm observation
             smooth_alpha: exponential smoothing factor (0=no smoothing, 1=full smoothing)
-                Stage 2 uses 0.2 (light smoothing) since action_scale=2.0 already
-                produces large targets; heavy smoothing delays convergence.
+                Default 0.0 (no smoothing) to match training exactly.
+                Training has NO action smoothing — the PD actuator provides
+                inherent damping. Adding EMA causes lag and divergence.
 
         Returns:
             targets: [N, 7] absolute joint positions for the 7 policy-controlled joints.
@@ -198,9 +199,9 @@ class ArmPolicyWrapper:
         self._prev_action = raw_action.clone()
         # Clamp raw action (matches training)
         clamped_action = raw_action.clamp(-ARM_ACTION_CLAMP, ARM_ACTION_CLAMP)
-        # target = default + clamped_action * scale
+        # target = default + clamped_action * scale  (no smoothing, matches training)
         targets = self._default_arm.unsqueeze(0) + clamped_action * ARM_ACTION_SCALE
-        # Light EMA smoothing to reduce jitter
+        # Optional EMA smoothing (disabled by default to match training)
         if smooth_alpha > 0 and self._prev_targets is not None:
             targets = (1.0 - smooth_alpha) * targets + smooth_alpha * self._prev_targets
         self._prev_targets = targets.clone()

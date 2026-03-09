@@ -896,8 +896,12 @@ class HierarchicalG1Env:
     def set_arm_target_world(self, target_world: torch.Tensor):
         """
         Set arm reach target in world coordinates.
-        The body-frame target is recomputed EACH STEP in _build_arm_obs()
-        since the robot moves and the body frame changes continuously.
+
+        CRITICAL: The body-frame target is computed HERE and FROZEN.
+        This matches the training behavior where target_pos_body is set
+        once per episode and never recomputed. Recomputing each step
+        causes an unstable feedback loop: arm motion → body sway →
+        body-frame target shifts → arm chases moving target → divergence.
 
         Args:
             target_world: [N, 3] or [3] target position in world frame
@@ -905,7 +909,7 @@ class HierarchicalG1Env:
         if target_world.ndim == 1:
             target_world = target_world.unsqueeze(0).expand(self.num_envs, -1)
         self._arm_target_world = target_world.clone()
-        # Also compute initial body frame for reset_arm_policy_state
+        # Compute and FREEZE body-frame target (matches training)
         root_pos = self.robot.data.root_pos_w
         root_quat = self.robot.data.root_quat_w
         self._arm_target_body = quat_apply_inverse(root_quat, target_world - root_pos)
@@ -937,7 +941,7 @@ class HierarchicalG1Env:
     #  Magnetic Grasp: attach/detach object to/from palm
     # ================================================================== #
 
-    def attach_object_to_hand(self, max_dist: float = 0.10) -> bool:
+    def attach_object_to_hand(self, max_dist: float = 0.20) -> bool:
         """Attach the pickup object to the palm if EE is within max_dist.
 
         Computes offset from palm to object center in palm local frame,
@@ -1084,11 +1088,9 @@ class HierarchicalG1Env:
         root_pos = r.data.root_pos_w
         root_quat = r.data.root_quat_w
 
-        # --- Recompute target in body frame each step ---
-        # This is essential: the robot walks/rotates, so body frame changes
-        self._arm_target_body = quat_apply_inverse(
-            root_quat, self._arm_target_world - root_pos
-        )
+        # Body-frame target is FROZEN (set by set_arm_target_world/body).
+        # Do NOT recompute here -- matches training where target_pos_body
+        # is fixed for the entire episode.  Recomputing causes feedback loop.
 
         # Right arm joint pos/vel (7 policy joints)
         arm_pos = r.data.joint_pos[:, self._arm_policy_joint_idx]
