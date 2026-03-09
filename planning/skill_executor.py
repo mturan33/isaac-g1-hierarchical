@@ -6,7 +6,7 @@ Executes a plan (list of skill steps) sequentially on the HierarchicalG1Env.
 Skills:
     - walk_to: WalkToSkill with stop_distance, then 50-step stabilize
     - pre_reach: raise arm above table to avoid collision (intermediate target)
-    - reach: manipulation mode -> Stage 7 arm policy -> magnetic attach
+    - reach: manipulation mode -> Stage 2 arm policy -> magnetic attach
     - grasp: finger_controller.close("both"), hold
     - lift: raise arm above basket height using arm policy (intermediate target)
     - lateral_walk: sidestep while holding arm position (slow, stable)
@@ -36,7 +36,7 @@ class SkillExecutor:
 
     # Right shoulder offset in body frame (from arm_policy_wrapper.py)
     SHOULDER_OFFSET = [0.0, -0.174, 0.259]
-    MAX_REACH = 0.50  # Extended for table-top reach (physical arm ~0.50m)
+    MAX_REACH = 0.55  # Stage 2 arm policy has 55cm reach capability
 
     # Arm joint indices within the 14-joint arm group
     # ARM_JOINT_NAMES order: L_sh_pitch(0), L_sh_roll(1), L_sh_yaw(2), L_elbow(3),
@@ -501,10 +501,10 @@ class SkillExecutor:
         return {"status": "success", "reason": f"Arm raised high (EE z={ee_final[0,2].item():.3f}m)"}
 
     # ------------------------------------------------------------------
-    # reach: Extend arm to target using Stage 7 arm policy + magnetic attach
+    # reach: Extend arm to target using Stage 2 arm policy + magnetic attach
     # ------------------------------------------------------------------
     def _execute_reach(self, target: str) -> dict:
-        """Reach toward a target with the Stage 7 arm policy.
+        """Reach toward a target with the Stage 2 arm policy.
 
         Strategy:
         1. Compute reachable target clamped to MAX_REACH from shoulder
@@ -760,7 +760,7 @@ class SkillExecutor:
         """Lift the held object STRAIGHT UP above basket height using the arm policy.
 
         Sets a target position directly ABOVE current EE (vertical lift),
-        then lets the Stage 7 arm policy figure out the joint angles.
+        then lets the Stage 2 arm policy figure out the joint angles.
         This is the intermediate target before lateral walk to basket.
         """
         from isaaclab.utils.math import quat_apply_inverse, quat_apply

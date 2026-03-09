@@ -1,38 +1,29 @@
 """
-Stage 7 Arm Policy Wrapper
+Stage 2 Arm Policy Wrapper
 ===========================
-Loads the Stage 7 arm actor (right arm only, 55 obs -> 5 act)
+Loads the Stage 2 arm actor (right arm, 39 obs -> 7 act)
 and runs inference for the hierarchical control pipeline.
 
-The arm actor was trained on the OLD 23-DoF G1 robot with these joint names:
+7 right arm joints controlled:
   right_shoulder_pitch_joint, right_shoulder_roll_joint,
-  right_shoulder_yaw_joint, right_elbow_pitch_joint, right_elbow_roll_joint
+  right_shoulder_yaw_joint, right_elbow_joint,
+  right_wrist_roll_joint, right_wrist_pitch_joint, right_wrist_yaw_joint
 
-On the NEW 29-DoF G1+DEX3 robot, these map to:
-  right_shoulder_pitch_joint  (same)
-  right_shoulder_roll_joint   (same)
-  right_shoulder_yaw_joint    (same)
-  right_elbow_joint           (was: right_elbow_pitch_joint)
-  right_wrist_roll_joint      (was: right_elbow_roll_joint)
-
-The remaining wrist joints (wrist_pitch, wrist_yaw) are NOT controlled by
-the policy and must be managed by the heuristic fallback.
-
-Network: 55 -> [256, ELU, 256, ELU, 128, ELU] -> 5 (NO LayerNorm)
-Action scale: 0.5  (target = default_arm + action * 0.5)
-Default arm: ALL ZEROS (as trained on 23-DoF)
+Network: 39 -> [256, ELU, 256, ELU, 128, ELU] -> 7 (NO LayerNorm)
+Action scale: 2.0  (target = default_arm + clamp(action, -1.5, 1.5) * 2.0)
+Default arm: [0.35, -0.18, 0.0, 0.87, 0.0, 0.0, 0.0]
 
 Checkpoint format (DualActorCritic):
   model_state_dict:
-    arm_actor.net.0.weight  [256, 55]
+    arm_actor.net.0.weight  [256, 39]
     arm_actor.net.0.bias    [256]
     arm_actor.net.2.weight  [256, 256]
     arm_actor.net.2.bias    [256]
     arm_actor.net.4.weight  [128, 256]
     arm_actor.net.4.bias    [128]
-    arm_actor.net.6.weight  [5, 128]
-    arm_actor.net.6.bias    [5]
-    arm_actor.log_std       [5]
+    arm_actor.net.6.weight  [7, 128]
+    arm_actor.net.6.bias    [7]
+    arm_actor.log_std       [7]
 """
 
 from __future__ import annotations
@@ -43,53 +34,39 @@ import torch.nn as nn
 from typing import Optional
 
 
-# Stage 7 arm obs/act dimensions
-ARM_OBS_DIM = 55
-ARM_ACT_DIM = 5
+# Stage 2 arm obs/act dimensions
+ARM_OBS_DIM = 39
+ARM_ACT_DIM = 7
 
-# Action scale (must match training)
-ARM_ACTION_SCALE = 0.5
+# Action scale and clamp (must match training)
+ARM_ACTION_SCALE = 2.0
+ARM_ACTION_CLAMP = 1.5  # raw action clamped before scaling
 
-# Default arm pose — all zeros (as in 23-DoF training)
-ARM_DEFAULT = [0.0, 0.0, 0.0, 0.0, 0.0]
+# Default arm pose (Stage 2, 29-DoF robot)
+ARM_DEFAULT = [0.35, -0.18, 0.0, 0.87, 0.0, 0.0, 0.0]
 
-# Palm forward offset for EE computation
-PALM_FORWARD_OFFSET = 0.08
+# Palm forward offset for EE computation (matches Stage 2 training: 0.02)
+PALM_FORWARD_OFFSET = 0.02
 
 # Shoulder offset in body frame (right shoulder)
 SHOULDER_OFFSET = [0.0, -0.174, 0.259]
 
-# Stage 7 curriculum level 7 thresholds
-OBS_POS_THRESHOLD = 0.04  # meters
+# Reach steps
 MAX_REACH_STEPS = 150
 
-# Joint limits from 23-DoF training robot (must clamp to prevent OOD)
-# Order: shoulder_pitch, shoulder_roll, shoulder_yaw, elbow, wrist_roll
-# Conservative limits (tighter than physical) to stay within training distribution
-ARM_JOINT_LOWER = [-1.50, -1.50, -1.80, -0.20, -1.50]
-ARM_JOINT_UPPER = [ 1.50,  1.00,  1.80,  2.50,  1.50]
-HEIGHT_DEFAULT = 0.72     # Stage 7 training height command
-
-# Joint name mapping: Stage 7 (23-DoF) -> 29-DoF
-# Stage 7 arm joints -> 29-DoF equivalents
-STAGE7_TO_29DOF = {
-    "right_shoulder_pitch_joint": "right_shoulder_pitch_joint",
-    "right_shoulder_roll_joint": "right_shoulder_roll_joint",
-    "right_shoulder_yaw_joint": "right_shoulder_yaw_joint",
-    "right_elbow_pitch_joint": "right_elbow_joint",
-    "right_elbow_roll_joint": "right_wrist_roll_joint",
-}
-
-# The 5 arm joints controlled by Stage 7 policy, in 29-DoF names
+# The 7 arm joints controlled by Stage 2 policy, in 29-DoF names
 ARM_POLICY_JOINT_NAMES_29DOF = [
     "right_shoulder_pitch_joint",
     "right_shoulder_roll_joint",
     "right_shoulder_yaw_joint",
-    "right_elbow_joint",        # was: right_elbow_pitch_joint
-    "right_wrist_roll_joint",   # was: right_elbow_roll_joint
+    "right_elbow_joint",
+    "right_wrist_roll_joint",
+    "right_wrist_pitch_joint",
+    "right_wrist_yaw_joint",
 ]
 
 # Finger joint names for right hand (29-DoF DEX3)
+# Not used by Stage 2 obs, but still needed for finger controller
 RIGHT_FINGER_JOINT_NAMES_29DOF = [
     "right_hand_index_0_joint",
     "right_hand_middle_0_joint",
@@ -123,20 +100,20 @@ def compute_orientation_error(palm_quat: torch.Tensor, target_dir: Optional[torc
 
 class ArmPolicyWrapper:
     """
-    Wrapper for the Stage 7 arm actor neural network.
+    Wrapper for the Stage 2 arm actor neural network.
 
     Loads weights from the DualActorCritic checkpoint and provides:
-      - get_action(obs_55) -> action_5
-      - build_obs(...) -> obs_55  (given robot state + target)
+      - get_action(obs_39) -> action_7
+      - build_obs(...) -> obs_39  (given robot state + target)
 
-    Only controls RIGHT arm (5 joints). Left arm stays at default or heuristic.
+    Only controls RIGHT arm (7 joints). Left arm stays at default.
     """
 
     def __init__(self, checkpoint_path: str, device: str = "cuda:0"):
         self.device = torch.device(device)
         self.checkpoint_path = checkpoint_path
 
-        # Build arm actor: 55 -> [256, ELU, 256, ELU, 128, ELU] -> 5
+        # Build arm actor: 39 -> [256, ELU, 256, ELU, 128, ELU] -> 7
         layers = []
         prev = ARM_OBS_DIM
         for h in [256, 256, 128]:
@@ -165,31 +142,30 @@ class ArmPolicyWrapper:
 
         self.net.load_state_dict(arm_state)
 
-        # Load log_std for reference (not used in deterministic inference)
-        self.log_std = state.get("arm_actor.log_std", torch.zeros(ARM_ACT_DIM))
-
-        # Default arm pose (all zeros, as in 23-DoF training)
+        # Default arm pose
         self._default_arm = torch.tensor(
             ARM_DEFAULT, dtype=torch.float32, device=self.device
         )
 
-        # Joint limits from 23-DoF training robot
-        self._joint_lower = torch.tensor(
-            ARM_JOINT_LOWER, dtype=torch.float32, device=self.device
-        )
-        self._joint_upper = torch.tensor(
-            ARM_JOINT_UPPER, dtype=torch.float32, device=self.device
-        )
+        # Internal state
+        self._prev_targets = None
+        self._prev_action = None  # raw network output for prev_arm_act obs
 
         # Print info
         ckpt_name = os.path.basename(checkpoint_path)
         curriculum = ckpt.get("curriculum_level", "?")
         best_reward = ckpt.get("best_reward", "?")
         iteration = ckpt.get("iteration", ckpt.get("iter", "?"))
-        print(f"[ArmPolicy Stage7] Architecture: {ARM_OBS_DIM} -> [256,256,128](ELU) -> {ARM_ACT_DIM}")
-        print(f"[ArmPolicy Stage7] Checkpoint: {ckpt_name}")
-        print(f"[ArmPolicy Stage7] iter={iteration}, reward={best_reward}, curriculum={curriculum}")
-        print(f"[ArmPolicy Stage7] Action scale: {ARM_ACTION_SCALE}, default: all zeros")
+        print(f"[ArmPolicy Stage2] Architecture: {ARM_OBS_DIM} -> [256,256,128](ELU) -> {ARM_ACT_DIM}")
+        print(f"[ArmPolicy Stage2] Checkpoint: {ckpt_name}")
+        print(f"[ArmPolicy Stage2] iter={iteration}, reward={best_reward}, curriculum={curriculum}")
+        print(f"[ArmPolicy Stage2] Action scale: {ARM_ACTION_SCALE}, clamp: +/-{ARM_ACTION_CLAMP}")
+        print(f"[ArmPolicy Stage2] Default arm: {ARM_DEFAULT}")
+
+    @property
+    def prev_action(self) -> Optional[torch.Tensor]:
+        """Previous raw action output (for prev_arm_act observation)."""
+        return self._prev_action
 
     @torch.no_grad()
     def get_action(self, obs: torch.Tensor) -> torch.Tensor:
@@ -197,10 +173,10 @@ class ArmPolicyWrapper:
         Run arm actor inference.
 
         Args:
-            obs: [N, 55] arm observation vector
+            obs: [N, 39] arm observation vector
 
         Returns:
-            action: [N, 5] raw arm actions (before scaling)
+            action: [N, 7] raw arm actions (before clamping/scaling)
         """
         return self.net(obs)
 
@@ -209,24 +185,21 @@ class ArmPolicyWrapper:
         Get absolute joint targets from arm policy.
 
         Args:
-            obs: [N, 55] arm observation
+            obs: [N, 39] arm observation
             smooth_alpha: exponential smoothing factor (0=no smoothing, 1=full smoothing)
 
         Returns:
-            targets: [N, 5] absolute joint positions for the 5 policy-controlled joints,
-                     clamped to training joint limits and smoothed to prevent instability.
+            targets: [N, 7] absolute joint positions for the 7 policy-controlled joints.
         """
         raw_action = self.get_action(obs)
-        # target = default + action * scale  (matches Stage 7 training)
-        targets = self._default_arm.unsqueeze(0) + raw_action * ARM_ACTION_SCALE
-        # Clamp to conservative joint limits
-        # Without this, the 29-DoF robot's wider limits allow the arm to
-        # enter out-of-distribution states, causing a positive feedback loop
-        # where the policy outputs increasingly extreme actions.
-        targets = torch.max(targets, self._joint_lower.unsqueeze(0))
-        targets = torch.min(targets, self._joint_upper.unsqueeze(0))
-        # Exponential smoothing: blend with previous targets to reduce jitter
-        if smooth_alpha > 0 and hasattr(self, '_prev_targets') and self._prev_targets is not None:
+        # Store raw action for prev_arm_act observation (before clamping)
+        self._prev_action = raw_action.clone()
+        # Clamp raw action (matches training)
+        clamped_action = raw_action.clamp(-ARM_ACTION_CLAMP, ARM_ACTION_CLAMP)
+        # target = default + clamped_action * scale
+        targets = self._default_arm.unsqueeze(0) + clamped_action * ARM_ACTION_SCALE
+        # Exponential smoothing
+        if smooth_alpha > 0 and self._prev_targets is not None:
             targets = (1.0 - smooth_alpha) * targets + smooth_alpha * self._prev_targets
         self._prev_targets = targets.clone()
         return targets
@@ -235,118 +208,66 @@ class ArmPolicyWrapper:
         """Reset internal state (call when activating the arm policy).
 
         Args:
-            current_targets: [N, 5] current right arm joint positions.
-                If provided, used as initial smoothing reference so the
-                first step blends from the current pose instead of jumping.
+            current_targets: [N, 7] current right arm joint positions.
+                If provided, used as initial smoothing reference.
         """
         if current_targets is not None:
             self._prev_targets = current_targets.clone()
+            n = current_targets.shape[0]
+            self._prev_action = torch.zeros(n, ARM_ACT_DIM, device=self.device)
         else:
             self._prev_targets = None
+            self._prev_action = None
 
     @staticmethod
     def build_obs(
-        arm_pos: torch.Tensor,           # [N, 5] right arm joint positions
-        arm_vel: torch.Tensor,           # [N, 5] right arm joint velocities
-        finger_pos: torch.Tensor,        # [N, 7] right finger joint positions
+        arm_pos: torch.Tensor,           # [N, 7] right arm joint positions
+        arm_vel: torch.Tensor,           # [N, 7] right arm joint velocities
         ee_body: torch.Tensor,           # [N, 3] EE position in body frame
-        ee_vel_body: torch.Tensor,       # [N, 3] EE velocity in body frame
         palm_quat: torch.Tensor,         # [N, 4] palm quaternion (wxyz)
-        finger_lower: torch.Tensor,      # [7] finger lower limits
-        finger_upper: torch.Tensor,      # [7] finger upper limits
         target_body: torch.Tensor,       # [N, 3] target position in body frame
-        root_height: torch.Tensor,       # [N] current root z position
-        lin_vel_body: torch.Tensor,      # [N, 3] body-frame linear velocity
-        ang_vel_body: torch.Tensor,      # [N, 3] body-frame angular velocity
+        prev_arm_act: torch.Tensor,      # [N, 7] previous raw arm action
         steps_since_spawn: torch.Tensor, # [N] steps since arm was activated
-        ee_pos_at_spawn: torch.Tensor,   # [N, 3] EE body pos when arm was activated
-        initial_dist: torch.Tensor,      # [N] initial distance to target
         target_orient: Optional[torch.Tensor] = None,  # [N, 3] target orient dir
     ) -> torch.Tensor:
         """
-        Build 55-dim observation matching Stage 7 training format exactly.
+        Build 39-dim observation matching Stage 2 training format exactly.
+
+        Order: arm_pos(7) + arm_vel*0.1(7) + ee_body(3) + palm_quat(4)
+               + target_body(3) + target_orient(3) + pos_error(3)
+               + orient_err_norm(1) + prev_arm_act(7) + steps_norm(1) = 39
 
         Returns:
-            obs: [N, 55] clamped to [-10, 10]
+            obs: [N, 39] clamped to [-10, 10]
         """
         n = arm_pos.shape[0]
         device = arm_pos.device
 
-        # Finger gripper ratio
-        finger_range = finger_upper.unsqueeze(0) - finger_lower.unsqueeze(0) + 1e-6
-        finger_normalized = (finger_pos - finger_lower.unsqueeze(0)) / finger_range
-        gripper_closed_ratio = finger_normalized.mean(dim=-1, keepdim=True)
-
-        # Grip force estimate
-        grip_force = gripper_closed_ratio.clamp(0, 1)  # simplified
-
-        # Contact detection
-        pos_error = target_body - ee_body
-        dist_to_target = pos_error.norm(dim=-1, keepdim=True)
-        contact_detected = (dist_to_target < 0.08).float()
-
-        # Position error normalized
-        pos_dist = dist_to_target / 0.5
-
-        # Orientation error
         if target_orient is None:
             target_orient = torch.zeros(n, 3, device=device)
             target_orient[:, 2] = -1.0  # palm down
+
+        # Position error
+        pos_error = target_body - ee_body
+
+        # Orientation error normalized by pi
         orient_err = compute_orientation_error(palm_quat, target_orient).unsqueeze(-1) / 3.14159
 
-        # Target reached (curriculum level 7 thresholds)
-        orient_threshold = 2.0  # Level 7
-        target_reached = (
-            (dist_to_target < OBS_POS_THRESHOLD) &
-            (orient_err * 3.14159 < orient_threshold)
-        ).float()
+        # Steps normalized
+        steps_norm = (steps_since_spawn.float() / MAX_REACH_STEPS).unsqueeze(-1).clamp(0, 2)
 
-        # Height observations
-        height_cmd = torch.full((n, 1), HEIGHT_DEFAULT, device=device)
-        current_height = root_height.unsqueeze(-1) if root_height.ndim == 1 else root_height
-        height_err = (height_cmd - current_height) / 0.4
-
-        # Placeholders (always zero in inference)
-        estimated_load = torch.zeros(n, 3, device=device)
-        object_in_hand = torch.zeros(n, 1, device=device)
-
-        # Velocity observations
-        lin_vel_xy = lin_vel_body[:, :2]
-        ang_vel_z = ang_vel_body[:, 2:3]
-
-        # Anti-gaming observations
-        max_steps = float(MAX_REACH_STEPS)
-        steps_norm = (steps_since_spawn.float() / max_steps).unsqueeze(-1).clamp(0, 2)
-        ee_displacement = (ee_body - ee_pos_at_spawn).norm(dim=-1, keepdim=True)
-        initial_dist_obs = initial_dist.unsqueeze(-1) / 0.5
-
-        # Assemble 55-dim observation (exact Stage 7 order)
+        # Assemble 39-dim observation (exact Stage 2 order)
         obs = torch.cat([
-            arm_pos,                    # 5   [0:5]
-            arm_vel * 0.1,              # 5   [5:10]
-            finger_pos,                 # 7   [10:17]
-            ee_body,                    # 3   [17:20]
-            ee_vel_body,                # 3   [20:23]
-            palm_quat,                  # 4   [23:27]
-            grip_force,                 # 1   [27]
-            gripper_closed_ratio,       # 1   [28]
-            contact_detected,           # 1   [29]
-            target_body,                # 3   [30:33]
-            pos_error,                  # 3   [33:36]
-            pos_dist,                   # 1   [36]
-            orient_err,                 # 1   [37]
-            target_reached,             # 1   [38]
-            height_cmd,                 # 1   [39]
-            current_height,             # 1   [40]
-            height_err,                 # 1   [41]
-            estimated_load,             # 3   [42:45]
-            object_in_hand,             # 1   [45]
-            target_orient,              # 3   [46:49]
-            lin_vel_xy,                 # 2   [49:51]
-            ang_vel_z,                  # 1   [51]
-            steps_norm,                 # 1   [52]
-            ee_displacement,            # 1   [53]
-            initial_dist_obs,           # 1   [54]
-        ], dim=-1)  # = 55
+            arm_pos,               # 7   [0:7]
+            arm_vel * 0.1,         # 7   [7:14]
+            ee_body,               # 3   [14:17]
+            palm_quat,             # 4   [17:21]
+            target_body,           # 3   [21:24]
+            target_orient,         # 3   [24:27]
+            pos_error,             # 3   [27:30]
+            orient_err,            # 1   [30]
+            prev_arm_act,          # 7   [31:38]
+            steps_norm,            # 1   [38]
+        ], dim=-1)  # = 39
 
         return obs.clamp(-10, 10).nan_to_num()

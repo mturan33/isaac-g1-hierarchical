@@ -39,7 +39,7 @@ parser.add_argument(
 )
 parser.add_argument(
     "--arm_checkpoint", type=str, default=None,
-    help="Path to Stage 7 arm policy checkpoint (.pt file)",
+    help="Path to Stage 2 arm policy checkpoint (.pt file)",
 )
 parser.add_argument(
     "--task", type=str,
