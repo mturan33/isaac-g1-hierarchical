@@ -1116,13 +1116,18 @@ class HierarchicalG1Env:
             target_orient=self._arm_target_orient,
         )
 
-        # Debug: print obs shape and key values on first step
-        if self._arm_steps_since_spawn[0].item() == 0:
+        # Debug: print obs components every 10 steps (compare with play script)
+        step_i = self._arm_steps_since_spawn[0].item()
+        if step_i % 10 == 0:
             pos_err = self._arm_target_body - ee_body
-            print(f"  [ArmObs] shape={obs.shape}, arm_pos[0]={arm_pos[0].tolist()}")
-            print(f"  [ArmObs] ee_body[0]={ee_body[0].tolist()}")
-            print(f"  [ArmObs] target_body[0]={self._arm_target_body[0].tolist()}")
-            print(f"  [ArmObs] pos_error[0]={pos_err[0].tolist()}")
+            print(f"  [ArmObs] step={step_i} obs_shape={obs.shape}")
+            print(f"  [ArmObs]   obs[0:7]  (arm_pos)     = {[f'{v:.3f}' for v in obs[0, 0:7].tolist()]}")
+            print(f"  [ArmObs]   obs[14:17] (ee_body)     = {[f'{v:.3f}' for v in obs[0, 14:17].tolist()]}")
+            print(f"  [ArmObs]   obs[21:24] (target_body) = {[f'{v:.3f}' for v in obs[0, 21:24].tolist()]}")
+            print(f"  [ArmObs]   obs[27:30] (pos_error)   = {[f'{v:.3f}' for v in obs[0, 27:30].tolist()]}")
+            print(f"  [ArmObs]   obs[30]    (orient_err)  = {obs[0, 30].item():.3f}")
+            print(f"  [ArmObs]   obs[31:38] (prev_act)    = {[f'{v:.3f}' for v in obs[0, 31:38].tolist()]}")
+            print(f"  [ArmObs]   obs[38]    (steps_norm)  = {obs[0, 38].item():.3f}")
 
         # Increment arm step counter
         self._arm_steps_since_spawn += 1
@@ -1142,6 +1147,13 @@ class HierarchicalG1Env:
         # Build obs and run policy
         obs = self._build_arm_obs()
         right_7_targets = self.arm_policy.get_arm_targets(obs)  # [N, 7]
+
+        # Debug: print action and targets every 10 steps
+        step_i = self._arm_steps_since_spawn[0].item()
+        if step_i % 10 == 0:
+            prev_act = self.arm_policy.prev_action
+            print(f"  [ArmAct] step={step_i} prev_act(clamped)={[f'{v:.3f}' for v in prev_act[0].tolist()]}")
+            print(f"  [ArmAct]   right_7_targets={[f'{v:.3f}' for v in right_7_targets[0].tolist()]}")
 
         # Start with default arm pose (14 joints: left 7 + right 7)
         arm_targets = self._default_arm.unsqueeze(0).expand(self.num_envs, -1).clone()

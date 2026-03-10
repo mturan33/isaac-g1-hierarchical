@@ -51,8 +51,8 @@ PALM_FORWARD_OFFSET = 0.02
 # Shoulder offset in body frame (right shoulder)
 SHOULDER_OFFSET = [0.0, -0.174, 0.259]
 
-# Reach steps
-MAX_REACH_STEPS = 150
+# Reach steps — MUST match training max_reach_steps (curriculum L14: 200)
+MAX_REACH_STEPS = 200
 
 # The 7 arm joints controlled by Stage 2 policy, in 29-DoF names
 ARM_POLICY_JOINT_NAMES_29DOF = [
@@ -195,10 +195,12 @@ class ArmPolicyWrapper:
             targets: [N, 7] absolute joint positions for the 7 policy-controlled joints.
         """
         raw_action = self.get_action(obs)
-        # Store raw action for prev_arm_act observation (before clamping)
-        self._prev_action = raw_action.clone()
         # Clamp raw action (matches training)
         clamped_action = raw_action.clamp(-ARM_ACTION_CLAMP, ARM_ACTION_CLAMP)
+        # Store CLAMPED action for prev_arm_act observation (matches training!)
+        # Training: prev_arm_act = arm_act.clone() AFTER clamp(-1.5, 1.5)
+        # BUG FIX: was storing raw_action (unclamped) → out-of-distribution obs
+        self._prev_action = clamped_action.clone()
         # target = default + clamped_action * scale  (no smoothing, matches training)
         targets = self._default_arm.unsqueeze(0) + clamped_action * ARM_ACTION_SCALE
         # Optional EMA smoothing (disabled by default to match training)
