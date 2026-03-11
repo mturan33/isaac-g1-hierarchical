@@ -941,7 +941,7 @@ class HierarchicalG1Env:
     #  Magnetic Grasp: attach/detach object to/from palm
     # ================================================================== #
 
-    def attach_object_to_hand(self, max_dist: float = 0.15) -> bool:
+    def attach_object_to_hand(self, max_dist: float = 0.20) -> bool:
         """Attach the pickup object to the palm if EE is within max_dist.
 
         Computes offset from palm to object center in palm local frame,
