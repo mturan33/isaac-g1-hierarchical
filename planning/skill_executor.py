@@ -671,6 +671,19 @@ class SkillExecutor:
         final_obj_dist = (ee_world - live_obj_pos).norm(dim=-1).mean().item()
         print(f"  [Reach] Final EE->obj: {final_obj_dist:.3f}m, attached={attached_during_reach}")
 
+        # Per-env state at reach end — critical for diagnosing subsequent falls
+        import math as _math_reach
+        _rp_end = env.robot.data.root_pos_w
+        _rq_end = env.robot.data.root_quat_w
+        for ei in range(env.num_envs):
+            h_i = _rp_end[ei, 2].item()
+            yaw_i = _math_reach.degrees(get_yaw_from_quat(_rq_end[ei:ei+1])[0].item())
+            vel_xy = env.robot.data.root_lin_vel_w[ei, :2].norm().item()
+            angvel_z = env.robot.data.root_ang_vel_w[ei, 2].item()
+            status = "OK" if h_i > 0.6 else "LOW"
+            print(f"  [Reach] ENV{ei} END | h={h_i:.3f} | yaw={yaw_i:.1f}deg | "
+                  f"vel_xy={vel_xy:.3f} | angvel_z={angvel_z:.3f} | {status}")
+
         return {
             "status": "success",
             "reason": f"Reached (best obj dist: {best_obj_dist:.3f}m, attached={attached_during_reach})",
@@ -715,12 +728,12 @@ class SkillExecutor:
         print(f"  [Grasp] Start | h={h:.2f} | stand={standing}/{env.num_envs} | "
               f"hold=[{hold_pos_xy[0,0]:.3f},{hold_pos_xy[0,1]:.3f}]")
 
-        # Close fingers for 20 steps with GENTLE PID hold
+        # Close fingers for 20 steps with moderate PID hold
         for step in range(20):
             if not self._is_running():
                 break
             hold_cmd, drift = self._compute_hold_cmd(hold_pos_xy, hold_yaw)
-            hold_cmd *= 0.5  # Gentle -- robot is vulnerable with extended arm
+            hold_cmd *= 0.8  # Moderate -- was 0.5, too gentle → drift accumulation
             obs = env.step_manipulation(hold_cmd, arm_targets)
 
         # Magnetic attach (skip if already attached)
@@ -729,12 +742,12 @@ class SkillExecutor:
         else:
             attached = True
 
-        # Brief hold (25 steps) with gentle PID -- minimize time in unstable config
+        # Brief hold (25 steps) with moderate PID
         for step in range(25):
             if not self._is_running():
                 break
             hold_cmd, drift = self._compute_hold_cmd(hold_pos_xy, hold_yaw)
-            hold_cmd *= 0.5  # Gentle corrections
+            hold_cmd *= 0.8  # Moderate corrections (was 0.5)
             obs = env.step_manipulation(hold_cmd, arm_targets)
 
             if step % 12 == 0:
@@ -748,6 +761,20 @@ class SkillExecutor:
             if fallen > env.num_envs // 2:
                 print(f"  [Grasp] Majority fell ({fallen}/{env.num_envs}), ending grasp early")
                 break
+
+        # Per-env state at grasp end — diagnose pre-lift condition
+        import math as _math_grasp
+        _rp_g = env.robot.data.root_pos_w
+        _rq_g = env.robot.data.root_quat_w
+        for ei in range(env.num_envs):
+            h_i = _rp_g[ei, 2].item()
+            yaw_i = _math_grasp.degrees(get_yaw_from_quat(_rq_g[ei:ei+1])[0].item())
+            vel_xy = env.robot.data.root_lin_vel_w[ei, :2].norm().item()
+            angvel_z = env.robot.data.root_ang_vel_w[ei, 2].item()
+            drift_i = (hold_pos_xy[ei] - _rp_g[ei, :2]).norm().item()
+            status = "OK" if h_i > 0.6 else "DANGER"
+            print(f"  [Grasp] ENV{ei} END | h={h_i:.3f} | yaw={yaw_i:.1f}deg | "
+                  f"drift={drift_i:.3f} | vel_xy={vel_xy:.3f} | angvel_z={angvel_z:.3f} | {status}")
 
         if attached:
             return {"status": "success", "reason": "Object attached to hand"}
@@ -798,6 +825,19 @@ class SkillExecutor:
         print(f"  [Lift] Current EE world: [{ee_world[0,0]:.3f}, {ee_world[0,1]:.3f}, {ee_world[0,2]:.3f}]")
         print(f"  [Lift] Target world:     [{lift_target_world[0,0]:.3f}, {lift_target_world[0,1]:.3f}, {lift_target_world[0,2]:.3f}]")
 
+        # --- Per-env diagnostics at lift start (captures grasp-end state) ---
+        import math as _math_lift
+        for ei in range(env.num_envs):
+            h_i = root_pos[ei, 2].item()
+            yaw_i = _math_lift.degrees(get_yaw_from_quat(root_quat[ei:ei+1])[0].item())
+            base_vel = env.robot.data.root_lin_vel_w[ei]
+            base_angvel = env.robot.data.root_ang_vel_w[ei]
+            vel_norm = base_vel[:2].norm().item()
+            angvel_z = base_angvel[2].item()
+            status = "OK" if h_i > 0.5 else "FALLEN"
+            print(f"  [Lift] ENV{ei} START | h={h_i:.3f} | yaw={yaw_i:.1f}deg | "
+                  f"vel_xy={vel_norm:.3f}m/s | angvel_z={angvel_z:.3f}rad/s | {status}")
+
         # Enable arm policy and set target
         env.enable_arm_policy(True)
         env.set_arm_target_world(lift_target_world)
@@ -826,10 +866,19 @@ class SkillExecutor:
                 ee_body_c = quat_apply_inverse(root_quat_c, ee_now - root_pos_c)
                 body_x = ee_body_c[0, 0].item()
 
-                if step % 20 == 0:
-                    print(f"  [Lift] Step {step:3d} | h={h:.2f} | stand={standing}/{env.num_envs} | "
-                          f"drift={drift:.3f} | EE=[{ee_now[0,0]:.2f},{ee_now[0,1]:.2f},{ee_now[0,2]:.2f}] | "
-                          f"bodyX={body_x:.2f}")
+                print(f"  [Lift] Step {step:3d} | h={h:.2f} | stand={standing}/{env.num_envs} | "
+                      f"drift={drift:.3f} | EE=[{ee_now[0,0]:.2f},{ee_now[0,1]:.2f},{ee_now[0,2]:.2f}] | "
+                      f"bodyX={body_x:.2f}")
+
+                # Per-env detail at every 10 steps to catch falls early
+                for ei in range(env.num_envs):
+                    h_i = obs["base_height"][ei].item()
+                    if h_i < 0.6:  # Only log robots that are falling or marginal
+                        yaw_i = _math_lift.degrees(get_yaw_from_quat(root_quat_c[ei:ei+1])[0].item())
+                        vel_xy = env.robot.data.root_lin_vel_w[ei, :2].norm().item()
+                        angvel_z = env.robot.data.root_ang_vel_w[ei, 2].item()
+                        print(f"  [Lift] ENV{ei} WARN step {step} | h={h_i:.3f} | yaw={yaw_i:.1f}deg | "
+                              f"vel_xy={vel_xy:.3f} | angvel_z={angvel_z:.3f}")
 
                 # Early stop if arm goes behind robot for multiple checks
                 if step > 15 and body_x < -0.05:
