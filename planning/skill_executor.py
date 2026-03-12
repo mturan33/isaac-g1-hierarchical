@@ -808,9 +808,9 @@ class SkillExecutor:
         hold_yaw = get_yaw_from_quat(root_quat).clone()
         print(f"  [Lift] PID hold at [{hold_pos_xy[0,0]:.3f}, {hold_pos_xy[0,1]:.3f}]")
 
-        # Run arm policy for 80 steps with PID hold (reduced from 120 — arm oscillates if too long)
+        # Run arm policy for 40 steps with PID hold (arm converges in ~10 steps, longer = more drift)
         behind_count = 0
-        for step in range(80):
+        for step in range(40):
             if not self._is_running():
                 break
             hold_cmd, drift = self._compute_hold_cmd(hold_pos_xy, hold_yaw)
@@ -857,17 +857,17 @@ class SkillExecutor:
               f"yaw={_math.degrees(cur_yaw_freeze[0].item()):.1f}deg")
 
         # Stabilize after lift — PID hold continues during stabilization
-        # Reduced to 30 steps to limit yaw drift with asymmetric load
-        print("  [Lift] Stabilizing (30 steps)...")
-        for step in range(30):
+        # Short stabilize to limit yaw drift with asymmetric load
+        print("  [Lift] Stabilizing (20 steps)...")
+        for step in range(20):
             if not self._is_running():
                 break
             hold_cmd, drift = self._compute_hold_cmd(hold_pos_xy, hold_yaw)
             obs = env.step_manipulation(hold_cmd, self._hold_arm_targets)
-            if step % 15 == 0:
+            if step % 10 == 0:
                 h = obs["base_height"].mean().item()
                 standing = (obs["base_height"] > 0.5).sum().item()
-                print(f"  [Lift] Stabilize {step}/30 | h={h:.2f} | stand={standing}/{env.num_envs} | drift={drift:.3f}")
+                print(f"  [Lift] Stabilize {step}/20 | h={h:.2f} | stand={standing}/{env.num_envs} | drift={drift:.3f}")
 
         # Log arm body-frame position AFTER stabilization to detect drift
         ee_final, _ = env._compute_palm_ee()
