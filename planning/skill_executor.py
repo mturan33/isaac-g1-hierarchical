@@ -698,39 +698,49 @@ class SkillExecutor:
             if not attached_during_reach and obj_dist < 0.20:
                 attached_during_reach = env.attach_object_to_hand(max_dist=0.25)
                 if attached_during_reach:
-                    attach_step = step
                     print(f"  [Reach] ** Magnetic attach at step {step}! dist={obj_dist:.3f}m **")
-                    print(f"  [Reach] Continuing arm policy for 20 more steps to stabilize with load...")
-
-            # After attach, run 20 more steps so arm adapts to object weight, then break
-            if attached_during_reach and step >= attach_step + 20:
-                print(f"  [Reach] Post-attach stabilization done at step {step}")
-                break
+                    break  # Immediately freeze arm — continuing causes violent downward movements
 
         print(f"  [Reach] Best EE->target: {best_ee_dist:.3f}m, Best EE->obj: {best_obj_dist:.3f}m")
 
-        # Hold phase: freeze arm, PID hold position for stability
-        # Shortened: if attached, arm already stabilized during post-attach steps
-        reach_hold_steps = 15 if attached_during_reach else 25
-        print(f"  [Reach] Holding arm position ({reach_hold_steps} steps)...")
+        # Hold phase: freeze arm, ZERO velocity (pure standing) to let robot find balance
+        # CRITICAL: PID corrections during this phase cause resonance with the asymmetric
+        # arm+object load — velocity increases instead of decreasing (Run 19 evidence).
+        # The loco policy is good at standing still; let it do its job without interference.
+        print(f"  [Reach] Holding arm position (zero velocity standing)...")
         env.enable_arm_policy(False)
         self._hold_arm_targets = env.robot.data.joint_pos[:, env._arm_idx].clone()
 
-        # Refresh hold position to CURRENT -- prevents fighting accumulated drift
-        hold_pos_xy = env.robot.data.root_pos_w[:, :2].clone()
-        hold_yaw = get_yaw_from_quat(env.robot.data.root_quat_w).clone()
-        self._hold_pos_xy = hold_pos_xy
-        self._hold_yaw = hold_yaw
+        REACH_HOLD_MIN = 20   # minimum hold steps for stability
+        REACH_HOLD_MAX = 60   # maximum hold steps
+        HOLD_VEL_THRESH = 0.20
+        HOLD_ANGVEL_THRESH = 0.3
 
-        for step in range(reach_hold_steps):
+        for step in range(REACH_HOLD_MAX):
             if not self._is_running():
                 break
-            hold_cmd, drift = self._compute_hold_cmd(hold_pos_xy, hold_yaw)
-            obs = env.step_manipulation(hold_cmd, self._hold_arm_targets)
-            if step % max(reach_hold_steps // 3, 1) == 0:
+            # ZERO velocity — let loco policy balance naturally with new load
+            obs = env.step_manipulation(self._stand_cmd, self._hold_arm_targets)
+
+            if step % 10 == 0:
                 h = obs["base_height"].mean().item()
                 standing = (obs["base_height"] > 0.5).sum().item()
-                print(f"  [Reach] Hold {step}/{reach_hold_steps} | h={h:.2f} | stand={standing}/{env.num_envs} | drift={drift:.3f}")
+                max_vel = env.robot.data.root_lin_vel_w[:, :2].norm(dim=-1).max().item()
+                max_angvel = env.robot.data.root_ang_vel_w[:, 2].abs().max().item()
+                print(f"  [Reach] Hold {step} | h={h:.2f} | stand={standing}/{env.num_envs} | "
+                      f"vel={max_vel:.3f} | angvel={max_angvel:.3f}")
+
+            # After minimum hold, check if velocity has settled
+            if step >= REACH_HOLD_MIN:
+                max_vel = env.robot.data.root_lin_vel_w[:, :2].norm(dim=-1).max().item()
+                max_angvel = env.robot.data.root_ang_vel_w[:, 2].abs().max().item()
+                if max_vel < HOLD_VEL_THRESH and max_angvel < HOLD_ANGVEL_THRESH:
+                    print(f"  [Reach] Hold settled at step {step}: vel={max_vel:.3f}, angvel={max_angvel:.3f}")
+                    break
+
+        # Refresh hold position to wherever robot ended up
+        self._hold_pos_xy = env.robot.data.root_pos_w[:, :2].clone()
+        self._hold_yaw = get_yaw_from_quat(env.robot.data.root_quat_w).clone()
 
         # Final distance check
         ee_world, _ = env._compute_palm_ee()
@@ -809,13 +819,12 @@ class SkillExecutor:
             pid_scale = 0.8
             print(f"  [Grasp] NORMAL mode: {finger_steps}+{hold_steps} steps, PID={pid_scale}")
 
-        # Close fingers
+        # Close fingers — ZERO velocity, let loco policy balance naturally
+        # PID corrections cause resonance with asymmetric arm+object load (Run 19 evidence)
         for step in range(finger_steps):
             if not self._is_running():
                 break
-            hold_cmd, drift = self._compute_hold_cmd(hold_pos_xy, hold_yaw)
-            hold_cmd *= pid_scale
-            obs = env.step_manipulation(hold_cmd, arm_targets)
+            obs = env.step_manipulation(self._stand_cmd, arm_targets)
 
         # Magnetic attach (skip if already attached)
         if not already_attached:
@@ -823,19 +832,19 @@ class SkillExecutor:
         else:
             attached = True
 
-        # Brief hold with PID
+        # Brief hold — zero velocity standing
         for step in range(hold_steps):
             if not self._is_running():
                 break
-            hold_cmd, drift = self._compute_hold_cmd(hold_pos_xy, hold_yaw)
-            hold_cmd *= pid_scale
-            obs = env.step_manipulation(hold_cmd, arm_targets)
+            obs = env.step_manipulation(self._stand_cmd, arm_targets)
 
             if step % max(hold_steps // 3, 1) == 0:
                 h = obs["base_height"].mean().item()
                 standing = (obs["base_height"] > 0.5).sum().item()
+                max_vel = env.robot.data.root_lin_vel_w[:, :2].norm(dim=-1).max().item()
+                max_angvel = env.robot.data.root_ang_vel_w[:, 2].abs().max().item()
                 print(f"  [Grasp] Hold {step}/{hold_steps} | h={h:.2f} | stand={standing}/{env.num_envs} | "
-                      f"drift={drift:.3f} | Attached: {attached}")
+                      f"vel={max_vel:.3f} | angvel={max_angvel:.3f} | Attached: {attached}")
 
             # Early stop if majority fell -- no point holding further
             fallen = (obs["base_height"] < 0.5).sum().item()
@@ -918,6 +927,64 @@ class SkillExecutor:
             status = "OK" if h_i > 0.5 else "FALLEN"
             print(f"  [Lift] ENV{ei} START | h={h_i:.3f} | yaw={yaw_i:.1f}deg | "
                   f"vel_xy={vel_norm:.3f}m/s | angvel_z={angvel_z:.3f}rad/s | {status}")
+
+        # --- Velocity settling phase: wait for robot to calm down before lift ---
+        # After grasp, some envs have high angular/linear velocity from asymmetric arm torque.
+        # Starting arm policy while robot is spinning → violent movements → fall.
+        # Run PID hold steps until velocity drops below safe thresholds.
+        arm_targets = self._hold_arm_targets
+        if arm_targets is None:
+            arm_targets = env.robot.data.joint_pos[:, env._arm_idx].clone()
+
+        VEL_THRESH = 0.25   # m/s linear velocity threshold
+        ANGVEL_THRESH = 0.4  # rad/s angular velocity threshold
+        MAX_SETTLE = 80      # max settling steps
+
+        # Check if settling is needed
+        max_vel = env.robot.data.root_lin_vel_w[:, :2].norm(dim=-1).max().item()
+        max_angvel = env.robot.data.root_ang_vel_w[:, 2].abs().max().item()
+        needs_settling = max_vel > VEL_THRESH or max_angvel > ANGVEL_THRESH
+
+        if needs_settling:
+            print(f"  [Lift] Velocity settling: vel={max_vel:.3f}m/s, angvel={max_angvel:.3f}rad/s "
+                  f"(thresholds: {VEL_THRESH}/{ANGVEL_THRESH})")
+            for settle_step in range(MAX_SETTLE):
+                if not self._is_running():
+                    break
+                # ZERO velocity — same reason as reach hold: PID causes resonance
+                obs = env.step_manipulation(self._stand_cmd, arm_targets)
+
+                max_vel = env.robot.data.root_lin_vel_w[:, :2].norm(dim=-1).max().item()
+                max_angvel = env.robot.data.root_ang_vel_w[:, 2].abs().max().item()
+
+                if settle_step % 20 == 0:
+                    h = obs["base_height"].mean().item()
+                    standing = (obs["base_height"] > 0.5).sum().item()
+                    print(f"  [Lift] Settle step {settle_step} | h={h:.2f} | stand={standing}/{env.num_envs} | "
+                          f"vel={max_vel:.3f} | angvel={max_angvel:.3f}")
+
+                if max_vel < VEL_THRESH and max_angvel < ANGVEL_THRESH:
+                    print(f"  [Lift] Settled at step {settle_step}: vel={max_vel:.3f}, angvel={max_angvel:.3f}")
+                    break
+            else:
+                print(f"  [Lift] Settle timeout ({MAX_SETTLE} steps): vel={max_vel:.3f}, angvel={max_angvel:.3f}")
+
+            # Refresh state after settling (robot may have moved)
+            root_pos = env.robot.data.root_pos_w
+            root_quat = env.robot.data.root_quat_w
+
+            # Recompute lift target from new position
+            ee_world, _ = env._compute_palm_ee()
+            ee_body = quat_apply_inverse(root_quat, ee_world - root_pos)
+            lift_body = ee_body.clone()
+            lift_body[:, 2] += 0.15
+            lift_body[:, 0] = torch.clamp(lift_body[:, 0], min=0.15)
+            from_shoulder = lift_body - shoulder_offset.unsqueeze(0)
+            dist = from_shoulder.norm(dim=-1, keepdim=True)
+            scale = torch.clamp(self.MAX_REACH / (dist + 1e-6), max=1.0)
+            lift_body_clamped = shoulder_offset.unsqueeze(0) + from_shoulder * scale
+            lift_target_world = quat_apply(root_quat, lift_body_clamped) + root_pos
+            print(f"  [Lift] Recomputed target after settle: [{lift_target_world[0,0]:.3f}, {lift_target_world[0,1]:.3f}, {lift_target_world[0,2]:.3f}]")
 
         # Enable arm policy and set target
         env.enable_arm_policy(True)
