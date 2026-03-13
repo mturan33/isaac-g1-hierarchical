@@ -1053,18 +1053,20 @@ class SkillExecutor:
               f"EE body: [{ee_body_freeze[0,0]:.3f},{ee_body_freeze[0,1]:.3f},{ee_body_freeze[0,2]:.3f}] | "
               f"yaw={_math.degrees(cur_yaw_freeze[0].item()):.1f}deg")
 
-        # Stabilize after lift — PID hold continues during stabilization
-        # Short stabilize to limit yaw drift with asymmetric load
-        print("  [Lift] Stabilizing (20 steps)...")
+        # Stabilize after lift — ZERO velocity (same as reach/grasp hold)
+        # PID during frozen-arm phases causes resonance with asymmetric load
+        print("  [Lift] Stabilizing (20 steps, zero velocity)...")
         for step in range(20):
             if not self._is_running():
                 break
-            hold_cmd, drift = self._compute_hold_cmd(hold_pos_xy, hold_yaw)
-            obs = env.step_manipulation(hold_cmd, self._hold_arm_targets)
+            obs = env.step_manipulation(self._stand_cmd, self._hold_arm_targets)
             if step % 10 == 0:
                 h = obs["base_height"].mean().item()
                 standing = (obs["base_height"] > 0.5).sum().item()
-                print(f"  [Lift] Stabilize {step}/20 | h={h:.2f} | stand={standing}/{env.num_envs} | drift={drift:.3f}")
+                max_vel = env.robot.data.root_lin_vel_w[:, :2].norm(dim=-1).max().item()
+                max_angvel = env.robot.data.root_ang_vel_w[:, 2].abs().max().item()
+                print(f"  [Lift] Stabilize {step}/20 | h={h:.2f} | stand={standing}/{env.num_envs} | "
+                      f"vel={max_vel:.3f} | angvel={max_angvel:.3f}")
 
         # Log arm body-frame position AFTER stabilization to detect drift
         ee_final, _ = env._compute_palm_ee()
