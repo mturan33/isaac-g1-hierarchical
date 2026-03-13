@@ -390,25 +390,20 @@ class SkillExecutor:
             # Heading error to target
             target_heading = torch.atan2(delta[:, 1], delta[:, 0])
             heading_err = normalize_angle(target_heading - yaw)
-            heading_err_abs = heading_err.abs().mean().item()
 
             if carrying:
-                # CARRY mode: turn-then-walk to avoid 3-axis simultaneous commands
-                if heading_err_abs > 0.26:  # > 15°: only turn
-                    vx = torch.zeros_like(dx_body)
-                    vy = torch.zeros_like(dy_body)
-                    vyaw = (heading_err * 0.8).clamp(-0.3, 0.3)
-                else:
-                    # Reduced velocities — loco policy never saw arm loads
-                    vx = (dx_body * 0.5).clamp(-0.20, 0.20)
-                    vy = (dy_body * 0.3).clamp(-0.09, 0.09)
-                    vyaw = (heading_err * 0.5).clamp(-0.3, 0.3)
+                # CARRY mode: omnidirectional at reduced velocities
+                # Pre-walk yaw correction already handled initial alignment
+                vx = (dx_body * 0.8).clamp(-0.30, 0.30)
+                vy = (dy_body * 0.5).clamp(-0.15, 0.15)
+                vyaw = (heading_err * 0.5).clamp(-0.25, 0.25)
 
-                # Ramp-up over first 50 steps (vyaw unramped for turn-in-place)
+                # Gentle ramp-up over first 50 steps
                 if step < 50:
-                    ramp = step / 50.0
+                    ramp = 0.3 + 0.7 * (step / 50.0)  # 0.3 → 1.0
                     vx = vx * ramp
                     vy = vy * ramp
+                    vyaw = vyaw * ramp
             else:
                 # NORMAL mode: full velocities (no load, arm just raised)
                 vx = (dx_body * 1.0).clamp(-0.40, 0.40)
