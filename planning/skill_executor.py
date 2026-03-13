@@ -335,8 +335,8 @@ class SkillExecutor:
                 target_heading_t = torch.atan2(delta_t[:, 1], delta_t[:, 0])
                 heading_err_t = normalize_angle(target_heading_t - yaw_t)
 
-                # Only yaw, no forward/lateral
-                vyaw_turn = (heading_err_t * 0.8).clamp(-0.3, 0.3)
+                # Only yaw, no forward/lateral — gentle with arm load
+                vyaw_turn = (heading_err_t * 0.6).clamp(-0.20, 0.20)
                 turn_cmd = torch.stack([
                     torch.zeros_like(vyaw_turn),
                     torch.zeros_like(vyaw_turn),
@@ -381,24 +381,31 @@ class SkillExecutor:
             dx_body = cos_y * delta[:, 0] + sin_y * delta[:, 1]
             dy_body = -sin_y * delta[:, 0] + cos_y * delta[:, 1]
 
-            # Proportional velocity commands (forward + lateral simultaneously)
-            # Conservative gains — robot carries asymmetric load, aggressive turns cause falls
-            vx = (dx_body * 1.0).clamp(-0.40, 0.40)
-            vy = (dy_body * 0.6).clamp(-0.20, 0.20)
-
-            # Gradually face the target (low yaw rate to prevent falls with load)
+            # Heading error to target
             target_heading = torch.atan2(delta[:, 1], delta[:, 0])
             heading_err = normalize_angle(target_heading - yaw)
-            vyaw = (heading_err * 0.5).clamp(-0.3, 0.3)
+            heading_err_abs = heading_err.abs().mean().item()
 
-            # Velocity ramp-up: start slow, gradually increase over first 100 steps
-            # Prevents sudden forces that topple robot with asymmetric arm load
-            RAMP_STEPS = 100
+            # Turn-then-walk: if yaw > 15° (0.26 rad), only turn — no forward/lateral
+            # Prevents 3-axis simultaneous commands that topple robot with arm load
+            if heading_err_abs > 0.26:
+                vx = torch.zeros_like(dx_body)
+                vy = torch.zeros_like(dy_body)
+                vyaw = (heading_err * 0.8).clamp(-0.3, 0.3)
+            else:
+                # Carry-mode velocity limits — half of unloaded speeds
+                # Loco policy never saw arm loads during training
+                vx = (dx_body * 0.5).clamp(-0.20, 0.20)
+                vy = (dy_body * 0.3).clamp(-0.09, 0.09)
+                vyaw = (heading_err * 0.5).clamp(-0.3, 0.3)
+
+            # Velocity ramp-up: start slow over first 50 steps
+            RAMP_STEPS = 50
             if step < RAMP_STEPS:
-                ramp = 0.3 + 0.7 * (step / RAMP_STEPS)  # 0.3 → 1.0
+                ramp = step / RAMP_STEPS  # 0.0 → 1.0
                 vx = vx * ramp
                 vy = vy * ramp
-                vyaw = vyaw * ramp
+                # Keep vyaw unramped so turn-in-place works from step 0
 
             vel_cmd = torch.stack([vx, vy, vyaw], dim=-1)
             obs = env.step_manipulation(vel_cmd, arm_targets)
