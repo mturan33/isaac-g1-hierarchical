@@ -313,8 +313,14 @@ class SkillExecutor:
         effective_dist = float('inf')
         step = 0
 
-        # Pre-walk yaw correction: turn in place to face target before walking
-        # Prevents simultaneous vx+vy+vyaw that topples robot with arm load
+        # Detect if carrying object — use conservative velocities only when loaded
+        carrying = getattr(env, '_object_attached', False)
+        if carrying:
+            print(f"  [OmniWalk] CARRY mode: reduced velocities (object attached)")
+        else:
+            print(f"  [OmniWalk] NORMAL mode: full velocities (no load)")
+
+        # Pre-walk yaw correction: only when carrying (asymmetric load makes multi-axis dangerous)
         root_pos_pre = env.robot.data.root_pos_w
         root_quat_pre = env.robot.data.root_quat_w
         yaw_pre = get_yaw_from_quat(root_quat_pre)
@@ -323,7 +329,7 @@ class SkillExecutor:
         heading_err_pre = normalize_angle(target_heading_pre - yaw_pre)
         yaw_err_deg = abs(heading_err_pre.mean().item()) * 57.3
 
-        if yaw_err_deg > 15:
+        if carrying and yaw_err_deg > 15:
             print(f"  [OmniWalk] Pre-walk yaw correction: {yaw_err_deg:.1f}deg off-target, turning in place...")
             for turn_step in range(80):
                 if not self._is_running():
@@ -386,26 +392,28 @@ class SkillExecutor:
             heading_err = normalize_angle(target_heading - yaw)
             heading_err_abs = heading_err.abs().mean().item()
 
-            # Turn-then-walk: if yaw > 15° (0.26 rad), only turn — no forward/lateral
-            # Prevents 3-axis simultaneous commands that topple robot with arm load
-            if heading_err_abs > 0.26:
-                vx = torch.zeros_like(dx_body)
-                vy = torch.zeros_like(dy_body)
-                vyaw = (heading_err * 0.8).clamp(-0.3, 0.3)
-            else:
-                # Carry-mode velocity limits — half of unloaded speeds
-                # Loco policy never saw arm loads during training
-                vx = (dx_body * 0.5).clamp(-0.20, 0.20)
-                vy = (dy_body * 0.3).clamp(-0.09, 0.09)
-                vyaw = (heading_err * 0.5).clamp(-0.3, 0.3)
+            if carrying:
+                # CARRY mode: turn-then-walk to avoid 3-axis simultaneous commands
+                if heading_err_abs > 0.26:  # > 15°: only turn
+                    vx = torch.zeros_like(dx_body)
+                    vy = torch.zeros_like(dy_body)
+                    vyaw = (heading_err * 0.8).clamp(-0.3, 0.3)
+                else:
+                    # Reduced velocities — loco policy never saw arm loads
+                    vx = (dx_body * 0.5).clamp(-0.20, 0.20)
+                    vy = (dy_body * 0.3).clamp(-0.09, 0.09)
+                    vyaw = (heading_err * 0.5).clamp(-0.3, 0.3)
 
-            # Velocity ramp-up: start slow over first 50 steps
-            RAMP_STEPS = 50
-            if step < RAMP_STEPS:
-                ramp = step / RAMP_STEPS  # 0.0 → 1.0
-                vx = vx * ramp
-                vy = vy * ramp
-                # Keep vyaw unramped so turn-in-place works from step 0
+                # Ramp-up over first 50 steps (vyaw unramped for turn-in-place)
+                if step < 50:
+                    ramp = step / 50.0
+                    vx = vx * ramp
+                    vy = vy * ramp
+            else:
+                # NORMAL mode: full velocities (no load, arm just raised)
+                vx = (dx_body * 1.0).clamp(-0.40, 0.40)
+                vy = (dy_body * 0.6).clamp(-0.20, 0.20)
+                vyaw = (heading_err * 0.5).clamp(-0.3, 0.3)
 
             vel_cmd = torch.stack([vx, vy, vyaw], dim=-1)
             obs = env.step_manipulation(vel_cmd, arm_targets)
