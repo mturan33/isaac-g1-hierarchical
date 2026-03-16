@@ -434,7 +434,7 @@ class SkillExecutor:
 
         if carrying and yaw_err_deg > 15:
             print(f"  [OmniWalk] Pre-walk yaw correction: {yaw_err_deg:.1f}deg off-target, turning in place...")
-            for turn_step in range(80):
+            for turn_step in range(300):
                 if not self._is_running():
                     break
                 root_pos_t = env.robot.data.root_pos_w
@@ -444,8 +444,8 @@ class SkillExecutor:
                 target_heading_t = torch.atan2(delta_t[:, 1], delta_t[:, 0])
                 heading_err_t = normalize_angle(target_heading_t - yaw_t)
 
-                # Only yaw, no forward/lateral — gentle with arm load
-                vyaw_turn = (heading_err_t * 0.6).clamp(-0.20, 0.20)
+                # Turn in place — moderate speed, safe with arm load
+                vyaw_turn = (heading_err_t * 1.0).clamp(-0.40, 0.40)
                 turn_cmd = torch.stack([
                     torch.zeros_like(vyaw_turn),
                     torch.zeros_like(vyaw_turn),
@@ -457,6 +457,8 @@ class SkillExecutor:
                 if remaining_err < 10:
                     print(f"  [OmniWalk] Yaw corrected at step {turn_step}: {remaining_err:.1f}deg remaining")
                     break
+                if turn_step % 50 == 0 and turn_step > 0:
+                    print(f"  [OmniWalk] Turn step {turn_step}: {remaining_err:.1f}deg remaining")
             # Brief stabilize after turn
             for _ in range(20):
                 if not self._is_running():
@@ -514,16 +516,16 @@ class SkillExecutor:
             heading_err = normalize_angle(target_heading - yaw)
 
             if carrying:
-                # CARRY mode: omnidirectional at moderate velocities
-                # Scale forward velocity by heading alignment to prevent spiraling
+                # CARRY mode: turn-first strategy to prevent spiraling
+                # Scale both vx and vy by alignment — only walk when roughly facing target
                 alignment = torch.cos(heading_err).clamp(0.0, 1.0)  # 1.0 = facing target
                 vx = (dx_body * 1.0 * alignment).clamp(-0.40, 0.40)
-                vy = (dy_body * 0.6).clamp(-0.25, 0.25)
-                vyaw = (heading_err * 0.8).clamp(-0.35, 0.35)
+                vy = (dy_body * 0.5 * alignment).clamp(-0.20, 0.20)  # Also scaled by alignment
+                vyaw = (heading_err * 1.0).clamp(-0.40, 0.40)
 
-                # Gentle ramp-up over first 20 steps (0.5 → 1.0)
-                if step < 20:
-                    ramp = 0.5 + 0.5 * (step / 20.0)
+                # Gentle ramp-up over first 10 steps
+                if step < 10:
+                    ramp = 0.5 + 0.5 * (step / 10.0)
                     vx = vx * ramp
                     vy = vy * ramp
                     vyaw = vyaw * ramp
@@ -533,12 +535,13 @@ class SkillExecutor:
                 vy = (dy_body * 0.6).clamp(-0.20, 0.20)
                 vyaw = (heading_err * 0.5).clamp(-0.3, 0.3)
 
-            # EMA smoothing to prevent zigzag (alpha=0.3 → smooth trajectory)
+            # EMA smoothing to prevent zigzag
             raw_cmd = torch.stack([vx, vy, vyaw], dim=-1)
+            ema_alpha = 0.5 if carrying else 0.3  # Less lag when carrying (short distances)
             if step == 0:
                 smoothed_cmd = raw_cmd.clone()
             else:
-                smoothed_cmd = 0.3 * raw_cmd + 0.7 * smoothed_cmd
+                smoothed_cmd = ema_alpha * raw_cmd + (1.0 - ema_alpha) * smoothed_cmd
             vel_cmd = smoothed_cmd
             vel_cmd = torch.where(self.env_active.unsqueeze(-1), vel_cmd, self._stand_cmd)
             obs = env.step_manipulation(vel_cmd, arm_targets)

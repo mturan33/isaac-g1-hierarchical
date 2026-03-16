@@ -172,48 +172,68 @@ class VideoRecorder:
 
 
 class CameraTracker:
-    """Tracks robot position with EMA-smoothed camera following.
+    """Tracks robot with body-frame camera offset (rotates with robot yaw).
 
-    Camera offset is relative to robot: 45 degrees front-right of right shoulder,
-    ~2m away, at shoulder height. Updates every 2 sim steps for performance.
+    Camera stays at 45 degrees front-right of right shoulder regardless of
+    robot orientation. Uses EMA smoothing on both position and yaw.
     """
 
-    # Camera offset relative to robot origin (body frame convention: +X forward, +Y left)
-    # 45 deg front-right, ~3m away, shoulder height
-    # front-right = positive X (front), negative Y (right)
-    EYE_OFFSET = (2.1, -2.1, 1.3)      # ~3m at 45deg: (3*cos45, -3*sin45, height)
-    TARGET_OFFSET = (0.2, -0.1, 0.65)  # Look at torso center
+    # Body-frame offset: 3m at 45deg front-right, shoulder height
+    EYE_RADIUS = 3.0        # Distance from robot in XY plane
+    EYE_ANGLE = -0.785      # -45deg (front-right in body frame: +X fwd, -Y right)
+    EYE_Z = 1.3             # Shoulder height
+    TARGET_FWD = 0.2        # Look-at offset forward (body frame)
+    TARGET_Z = 0.65         # Look-at height (torso center)
 
     def __init__(self):
         self._smooth_x = 0.0
         self._smooth_y = 0.0
-        self._alpha = 0.12  # Low alpha = very smooth camera movement, no jitter
+        self._smooth_yaw = 0.0
+        self._alpha_pos = 0.12   # Position smoothing (low = smooth)
+        self._alpha_yaw = 0.06   # Yaw smoothing (even lower = very smooth rotation)
         self._initialized = False
 
-    def update(self, robot_pos_w: torch.Tensor):
-        """Call every sim step. Smooth EMA tracking."""
+    def update(self, robot_pos_w: torch.Tensor, robot_quat_w: torch.Tensor = None):
+        """Call every sim step. Smooth EMA tracking with body-frame offset."""
+        import math
         rx = robot_pos_w[0, 0].item()
         ry = robot_pos_w[0, 1].item()
+
+        # Get robot yaw
+        if robot_quat_w is not None:
+            from high_low_hierarchical_g1.low_level.velocity_command import get_yaw_from_quat
+            yaw = get_yaw_from_quat(robot_quat_w)[0].item()
+        else:
+            yaw = 0.0
 
         if not self._initialized:
             self._smooth_x = rx
             self._smooth_y = ry
+            self._smooth_yaw = yaw
             self._initialized = True
         else:
-            self._smooth_x += self._alpha * (rx - self._smooth_x)
-            self._smooth_y += self._alpha * (ry - self._smooth_y)
+            self._smooth_x += self._alpha_pos * (rx - self._smooth_x)
+            self._smooth_y += self._alpha_pos * (ry - self._smooth_y)
+            # Smooth yaw with angle wrapping
+            dyaw = math.atan2(math.sin(yaw - self._smooth_yaw),
+                              math.cos(yaw - self._smooth_yaw))
+            self._smooth_yaw += self._alpha_yaw * dyaw
+
+        # Compute eye position in world frame using smoothed yaw
+        cam_angle_world = self._smooth_yaw + self.EYE_ANGLE
+        eye = (
+            self._smooth_x + self.EYE_RADIUS * math.cos(cam_angle_world),
+            self._smooth_y + self.EYE_RADIUS * math.sin(cam_angle_world),
+            self.EYE_Z,
+        )
+        # Look-at target: slightly ahead of robot in body frame
+        target = (
+            self._smooth_x + self.TARGET_FWD * math.cos(self._smooth_yaw),
+            self._smooth_y + self.TARGET_FWD * math.sin(self._smooth_yaw),
+            self.TARGET_Z,
+        )
 
         from isaacsim.core.utils.viewports import set_camera_view
-        eye = (
-            self._smooth_x + self.EYE_OFFSET[0],
-            self._smooth_y + self.EYE_OFFSET[1],
-            self.EYE_OFFSET[2],
-        )
-        target = (
-            self._smooth_x + self.TARGET_OFFSET[0],
-            self._smooth_y + self.TARGET_OFFSET[1],
-            self.TARGET_OFFSET[2],
-        )
         set_camera_view(eye=eye, target=target)
 
 
@@ -230,7 +250,7 @@ def _wrap_env_for_recording(env, recorder: VideoRecorder = None,
 
     def _post_step():
         if camera_tracker is not None:
-            camera_tracker.update(env.robot.data.root_pos_w)
+            camera_tracker.update(env.robot.data.root_pos_w, env.robot.data.root_quat_w)
         if recorder is not None:
             recorder.on_step()
 
@@ -311,7 +331,14 @@ def main():
     )
     sim = sim_utils.SimulationContext(sim_cfg)
     # Initial camera view — will be overridden by CameraTracker after first step
-    sim.set_camera_view(eye=[2.1, -2.1, 1.3], target=[0.2, -0.1, 0.65])
+    # Robot spawns at (0,0) facing +X. 45deg front-right in body frame = world (2.1, -2.1)
+    import math as _m
+    _cam_ang = 0.0 + CameraTracker.EYE_ANGLE  # yaw=0 at spawn
+    sim.set_camera_view(
+        eye=[CameraTracker.EYE_RADIUS * _m.cos(_cam_ang),
+             CameraTracker.EYE_RADIUS * _m.sin(_cam_ang), CameraTracker.EYE_Z],
+        target=[CameraTracker.TARGET_FWD, 0.0, CameraTracker.TARGET_Z],
+    )
 
     # ------------------------------------------------------------------
     # 2. Create hierarchical environment
