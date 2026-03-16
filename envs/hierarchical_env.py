@@ -504,6 +504,8 @@ class HierarchicalG1Env:
         # -- Magnetic grasp: snap object to palm when close enough --
         self._object_attached = False
         self._attach_offset_body = torch.zeros(num_envs, 3, device=device)  # offset in palm frame
+        self._attach_quat_offset = torch.zeros(num_envs, 4, device=device)  # relative orientation (wxyz)
+        self._attach_quat_offset[:, 0] = 1.0  # identity quaternion
 
         # -- Debug visualization markers --
         self._debug_markers_enabled = False
@@ -959,11 +961,16 @@ class HierarchicalG1Env:
         mean_dist = dist.mean().item()
 
         if mean_dist < max_dist:
+            from isaaclab.utils.math import quat_mul, quat_conjugate
             # Compute offset: cup_pos - ee_pos in palm frame (keep actual distance)
             diff_world = obj_pos - ee_world
             self._attach_offset_body = quat_apply_inverse(palm_quat, diff_world)
+            # Save relative orientation: q_rel = q_palm^-1 * q_obj
+            # So q_obj = q_palm * q_rel at all times
+            obj_quat = self.pickup_obj.data.root_quat_w  # [N, 4] wxyz
+            self._attach_quat_offset = quat_mul(quat_conjugate(palm_quat), obj_quat)
             self._object_attached = True
-            print(f"  [MagneticGrasp] Object attached! dist={mean_dist:.3f}m")
+            print(f"  [MagneticGrasp] Object attached! dist={mean_dist:.3f}m (orientation preserved)")
             return True
         else:
             print(f"  [MagneticGrasp] Object too far: {mean_dist:.3f}m (max: {max_dist:.2f}m)")
@@ -1056,20 +1063,25 @@ class HierarchicalG1Env:
     def _update_attached_object(self):
         """Teleport attached object to follow the palm each sim step.
         Call this AFTER scene.write_data_to_sim() and BEFORE sim.step().
+
+        Position: obj_world = ee_world + R_palm * offset_body
+        Orientation: obj_quat = q_palm * q_rel  (preserves grab-time orientation)
         """
         if not self._object_attached:
             return
 
-        from isaaclab.utils.math import quat_apply
+        from isaaclab.utils.math import quat_apply, quat_mul
 
         ee_world, palm_quat = self._compute_palm_ee()
-        # Reconstruct cup world position from saved offset
+        # Reconstruct object world position from saved offset
         obj_target = ee_world + quat_apply(palm_quat, self._attach_offset_body)
+        # Reconstruct object orientation: q_palm * q_rel
+        obj_quat = quat_mul(palm_quat, self._attach_quat_offset)
 
         # Build root state [N, 13]: pos(3) + quat(4) + lin_vel(3) + ang_vel(3)
         root_state = self.pickup_obj.data.default_root_state.clone()
         root_state[:, :3] = obj_target
-        root_state[:, 3:7] = palm_quat  # cup follows palm orientation
+        root_state[:, 3:7] = obj_quat  # preserved grab-time orientation
         root_state[:, 7:] = 0.0  # zero velocity
 
         self.pickup_obj.write_root_state_to_sim(root_state)

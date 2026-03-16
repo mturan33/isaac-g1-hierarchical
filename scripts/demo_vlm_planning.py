@@ -483,13 +483,9 @@ def main():
     # ------------------------------------------------------------------
     # 8. Keep sim running briefly for visual inspection
     # ------------------------------------------------------------------
-    print("\n[Demo] Holding for 3 seconds...")
-    hold_start = time.time()
-    for i in range(150):  # ~3 seconds at 50Hz
+    print("\n[Demo] Holding for 1 second...")
+    for i in range(50):  # ~1 second at 50Hz
         if not simulation_app.is_running():
-            break
-        if time.time() - hold_start > 5.0:  # Wall-clock timeout (safety)
-            print("[Demo] Hold timeout reached")
             break
         obs = env.step(stand_cmd)
 
