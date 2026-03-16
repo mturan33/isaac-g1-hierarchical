@@ -101,18 +101,18 @@ import isaaclab.sim as sim_utils
 # ============================================================================
 
 def _find_ffmpeg() -> str:
-    """Find ffmpeg binary — checks PATH then WinGet packages."""
-    import shutil as _sh
+    """Find ffmpeg binary — prefers WinGet full build, then PATH."""
     import glob as _gl
-    ffmpeg_bin = _sh.which("ffmpeg")
-    if ffmpeg_bin is None:
-        pattern = os.path.expanduser(
-            "~/AppData/Local/Microsoft/WinGet/Packages/*/ffmpeg*/bin/ffmpeg.exe"
-        )
-        candidates = _gl.glob(pattern)
-        if candidates:
-            ffmpeg_bin = candidates[0]
-    return ffmpeg_bin or "ffmpeg"
+    # Prefer WinGet full build (has libx264)
+    pattern = os.path.expanduser(
+        "~/AppData/Local/Microsoft/WinGet/Packages/*/ffmpeg*/bin/ffmpeg.exe"
+    )
+    candidates = _gl.glob(pattern)
+    if candidates:
+        return candidates[0]
+    # Fallback to PATH
+    import shutil as _sh
+    return _sh.which("ffmpeg") or "ffmpeg"
 
 
 class VideoRecorder:
@@ -130,6 +130,10 @@ class VideoRecorder:
         self.width = width
         self.height = height
         self.frame_dir = os.path.join(output_dir, "frames")
+        # Clean old frames from previous runs
+        import shutil as _shutil_init
+        if os.path.exists(self.frame_dir):
+            _shutil_init.rmtree(self.frame_dir)
         os.makedirs(self.frame_dir, exist_ok=True)
         self.frame_count = 0
         self._sim_step = 0
@@ -244,20 +248,30 @@ class VideoRecorder:
         ]
 
         print(f"\n[VIDEO] Converting {self.frame_count} frames to MP4...")
+        print(f"[VIDEO] ffmpeg: {ffmpeg_bin}")
         print(f"[VIDEO] Command: {' '.join(cmd)}")
         try:
-            subprocess.run(cmd, check=True, capture_output=True)
-            print(f"[VIDEO] Saved: {output_path}")
-            import shutil
-            shutil.rmtree(self.frame_dir)
-            print(f"[VIDEO] Cleaned up frames")
-            return output_path
-        except subprocess.CalledProcessError as e:
-            print(f"[VIDEO] ffmpeg error: {e.stderr.decode()[:500]}")
+            result = subprocess.run(cmd, capture_output=True, timeout=120)
+            if result.returncode == 0:
+                print(f"[VIDEO] Saved: {output_path}")
+                import shutil
+                shutil.rmtree(self.frame_dir)
+                print(f"[VIDEO] Cleaned up frames")
+                return output_path
+            else:
+                stderr = result.stderr.decode(errors='replace')[:500]
+                stdout = result.stdout.decode(errors='replace')[:200]
+                print(f"[VIDEO] ffmpeg failed (rc={result.returncode})")
+                print(f"[VIDEO] stderr: {stderr}")
+                print(f"[VIDEO] stdout: {stdout}")
+                print(f"[VIDEO] Frames saved in: {self.frame_dir}")
+                return None
+        except FileNotFoundError:
+            print(f"[VIDEO] ffmpeg not found at: {ffmpeg_bin}")
             print(f"[VIDEO] Frames saved in: {self.frame_dir}")
             return None
-        except FileNotFoundError:
-            print(f"[VIDEO] ffmpeg not found!")
+        except Exception as e:
+            print(f"[VIDEO] ffmpeg error: {e}")
             print(f"[VIDEO] Frames saved in: {self.frame_dir}")
             return None
 
