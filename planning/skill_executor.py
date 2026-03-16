@@ -488,9 +488,94 @@ class SkillExecutor:
         env_reached = torch.zeros(env.num_envs, dtype=torch.bool, device=self.device)
         env_fallen = ~self.env_active.clone()  # inherit already-fallen state
 
+        # --- Periodic yaw re-correction helper (reuses pre-walk pattern) ---
+        import math as _math_recorr
+        RECORR_INTERVAL = 200     # stop-turn-walk every 200 steps
+        RECORR_YAW_THRESH = _math_recorr.radians(8)   # 8° — don't bother if nearly aligned
+        RECORR_YAW_RATE = 0.60
+        RECORR_MAX_STEPS = 150    # max turn steps per correction (~3s)
+
+        def _periodic_yaw_recorrection(step_idx: int, arm_tgt: torch.Tensor) -> int:
+            """Stop, turn to face target, stabilize. Returns extra steps consumed."""
+            nonlocal env_fallen
+            extra = 0
+            root_p = env.robot.data.root_pos_w
+            root_q = env.robot.data.root_quat_w
+            d = target_xy - root_p[:, :2]
+            d_dist = d.norm(dim=-1)
+            tgt_h = torch.atan2(d[:, 1], d[:, 0])
+            cur_y = get_yaw_from_quat(root_q)
+            h_err = normalize_angle(tgt_h - cur_y)
+
+            if h_err.abs().mean().item() < RECORR_YAW_THRESH:
+                print(f"  [OmniWalk] Re-corr @step {step_idx}: heading OK ({h_err[0].item()*57.3:.1f}deg), skip")
+                return 0
+
+            print(f"  [OmniWalk] Re-corr @step {step_idx}: heading_err={h_err[0].item()*57.3:.1f}deg, dist={d_dist[0].item():.2f}m — stopping to turn")
+
+            # Phase 1: brief stop (10 steps)
+            for _ in range(10):
+                if not self._is_running():
+                    return extra
+                obs = env.step_manipulation(self._stand_cmd, arm_tgt)
+                extra += 1
+
+            # Phase 2: in-place yaw correction
+            for rc_step in range(RECORR_MAX_STEPS):
+                if not self._is_running():
+                    return extra
+                root_p = env.robot.data.root_pos_w
+                root_q = env.robot.data.root_quat_w
+                d = target_xy - root_p[:, :2]
+                tgt_h = torch.atan2(d[:, 1], d[:, 0])
+                cur_y = get_yaw_from_quat(root_q)
+                h_err = normalize_angle(tgt_h - cur_y)
+
+                if h_err.abs().mean().item() < _math_recorr.radians(5):
+                    print(f"  [OmniWalk] Re-corr done in {rc_step} steps: err={h_err[0].item()*57.3:.1f}deg")
+                    break
+
+                vyaw_c = (h_err * 1.5).clamp(-RECORR_YAW_RATE, RECORR_YAW_RATE)
+                yaw_cmd = torch.zeros(env.num_envs, 3, device=self.device)
+                yaw_cmd[:, 2] = vyaw_c
+                yaw_cmd = torch.where(self.env_active.unsqueeze(-1), yaw_cmd, self._stand_cmd)
+                obs = env.step_manipulation(yaw_cmd, arm_tgt)
+                extra += 1
+
+                # Safety
+                bh = obs["base_height"]
+                env_fallen |= (bh < 0.4)
+                self.env_active[env_fallen] = False
+                if env_fallen.all():
+                    return extra
+            else:
+                print(f"  [OmniWalk] Re-corr timeout: err={h_err[0].item()*57.3:.1f}deg")
+
+            # Phase 3: brief stabilize (15 steps)
+            for _ in range(15):
+                if not self._is_running():
+                    return extra
+                obs = env.step_manipulation(self._stand_cmd, arm_tgt)
+                extra += 1
+
+            return extra
+
+        total_extra_steps = 0
+
         for step in range(max_steps):
             if not self._is_running():
                 break
+
+            # --- Periodic yaw re-correction when carrying ---
+            if carrying and step > 0 and step % RECORR_INTERVAL == 0:
+                # Only re-correct if still far from target
+                _rp = env.robot.data.root_pos_w
+                _dd = (target_xy - _rp[:, :2]).norm(dim=-1)
+                if _dd.mean().item() > stop_distance + 0.20:
+                    extra = _periodic_yaw_recorrection(step, arm_targets)
+                    total_extra_steps += extra
+                    if env_fallen.all():
+                        return {"status": "failed", "reason": "All robots fell during yaw re-correction"}
 
             root_pos = env.robot.data.root_pos_w
             root_quat = env.robot.data.root_quat_w
@@ -535,12 +620,14 @@ class SkillExecutor:
             heading_err = normalize_angle(target_heading - yaw)
 
             if carrying:
-                # CARRY mode: distance-scaled forward + lateral + yaw correction
-                # Slow down on approach so lateral/yaw corrections can work
-                speed_scale = (dist_per_env / 0.8).clamp(0.15, 1.0)  # decelerate within 0.8m
-                vx = (dx_body * 0.8 * speed_scale).clamp(-0.40, 0.40)
-                vy = (dy_body * 1.2).clamp(-0.40, 0.40)  # Faster lateral
-                vyaw = (heading_err * 0.6).clamp(-0.25, 0.25)  # Active yaw tracking
+                # CARRY mode: heading-aligned velocity controller
+                # vx scaled by cos(heading_err) → only walk forward when aimed at target
+                # Combined with periodic stop-turn-walk for drift correction
+                speed_scale = (dist_per_env / 2.0).clamp(0.10, 1.0)  # decelerate within 2.0m
+                heading_alignment = torch.cos(heading_err).clamp(min=0.0)  # 0@90°, 1@0°
+                vx = (dx_body * 0.6 * speed_scale * heading_alignment).clamp(-0.30, 0.30)
+                vy = (dy_body * 0.8 * speed_scale).clamp(-0.30, 0.30)
+                vyaw = (heading_err * 1.0).clamp(-0.40, 0.40)  # Strong yaw tracking
             else:
                 # NORMAL mode: full velocities (no load, arm just raised)
                 vx = (dx_body * 1.0).clamp(-0.40, 0.40)
@@ -549,7 +636,7 @@ class SkillExecutor:
 
             # EMA smoothing to prevent zigzag
             raw_cmd = torch.stack([vx, vy, vyaw], dim=-1)
-            ema_alpha = 0.7 if carrying else 0.3  # Fast response when carrying (short distances, must converge)
+            ema_alpha = 0.5 if carrying else 0.3
             if step == 0:
                 smoothed_cmd = raw_cmd.clone()
             else:
@@ -565,10 +652,13 @@ class SkillExecutor:
                     f"e{i}={dist_per_env[i]:.2f}{'*' if env_reached[i] else ''}{'X' if env_fallen[i] else ''}"
                     for i in range(env.num_envs)
                 )
+                herr_deg = f"{heading_err[0].item() * 57.3:.1f}" if step > 0 else "?"
+                halign = f"{heading_alignment[0].item():.2f}" if carrying else "-"
                 print(
                     f"  [OmniWalk] Step {step} | dist={effective_dist:.2f}m "
                     f"[{per_env}] | h={h:.2f} | "
                     f"stand={stand_count}/{env.num_envs} | reached={reached_count} | "
+                    f"herr={herr_deg}deg align={halign} | "
                     f"cmd=[{vx[0]:.2f},{vy[0]:.2f},{vyaw[0]:.2f}]"
                 )
 
@@ -579,7 +669,7 @@ class SkillExecutor:
         reached_count = env_reached.sum().item()
         standing_count = (~env_fallen).sum().item()
         print(
-            f"  [OmniWalk] Finished in {walk_time:.1f}s, {step + 1} steps | "
+            f"  [OmniWalk] Finished in {walk_time:.1f}s, {step + 1} walk steps + {total_extra_steps} re-corr steps | "
             f"reached={reached_count}/{env.num_envs} | "
             f"standing={standing_count}/{env.num_envs}"
         )
