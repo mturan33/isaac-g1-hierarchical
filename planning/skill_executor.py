@@ -571,7 +571,7 @@ class SkillExecutor:
 
         # Stabilize
         print("  [OmniWalk] Stabilizing...")
-        for _ in range(50):
+        for _ in range(30):
             if not self._is_running():
                 break
             obs = env.step_manipulation(self._stand_cmd, arm_targets)
@@ -617,7 +617,7 @@ class SkillExecutor:
                 return {"status": "failed", "reason": "All robots fell"}
 
         # Stabilize
-        for _ in range(50):
+        for _ in range(30):
             if not self._is_running():
                 break
             obs = self.env.step(self._stand_cmd)
@@ -676,8 +676,8 @@ class SkillExecutor:
         env.set_arm_target_world(pre_target_world)
         env.reset_arm_policy_state()
 
-        # Run arm policy for 100 steps (raise arm above table height)
-        for step in range(100):
+        # Run arm policy for 60 steps (raise arm above table height)
+        for step in range(60):
             if not self._is_running():
                 break
             obs = env.step_arm_policy(self._stand_cmd)
@@ -1399,13 +1399,13 @@ class SkillExecutor:
         env.arm_controller.set_pose(ArmPose.DEFAULT)
         env.finger_controller.open(hand="both")
 
-        for step in range(200):
+        for step in range(120):
             if not self._is_running():
                 break
             arm_targets = env.arm_controller.get_targets()
             obs = env.step_manipulation(self._stand_cmd, arm_targets)
 
-            if step % 50 == 0:
+            if step % 40 == 0:
                 h = obs["base_height"].mean().item()
                 standing = (obs["base_height"] > 0.5).sum().item()
                 print(f"  [Place] Step {step:4d} | Height: {h:.2f}m | "
