@@ -73,10 +73,6 @@ parser.add_argument(
 AppLauncher.add_app_launcher_args(parser)
 args_cli = parser.parse_args()
 
-# Auto-enable cameras when recording (required for offscreen rendering in headless)
-if args_cli.record and hasattr(args_cli, 'enable_cameras'):
-    args_cli.enable_cameras = True
-
 # Launch the simulator
 app_launcher = AppLauncher(args_cli)
 simulation_app = app_launcher.app
@@ -116,19 +112,15 @@ def _find_ffmpeg() -> str:
 
 
 class VideoRecorder:
-    """Captures RGB frames from an offscreen USD camera via replicator.
+    """Captures viewport frames at target FPS, then merges with ffmpeg.
 
-    Works in both GUI and headless mode (no viewport dependency).
-    Creates a UsdGeom.Camera prim and uses rep.create.render_product
-    + rgb annotator to capture frames.
+    Uses omni.kit.viewport.utility for frame capture — requires GUI mode
+    (do NOT use --headless when recording video).
     """
 
-    def __init__(self, output_dir: str, fps: int = 25, control_dt: float = 0.02,
-                 width: int = 1280, height: int = 720):
+    def __init__(self, output_dir: str, fps: int = 25, control_dt: float = 0.02):
         self.output_dir = output_dir
         self.fps = fps
-        self.width = width
-        self.height = height
         self.frame_dir = os.path.join(output_dir, "frames")
         # Clean old frames from previous runs
         import shutil as _shutil_init
@@ -139,56 +131,17 @@ class VideoRecorder:
         self._sim_step = 0
         self._capture_interval = max(1, int(1.0 / (control_dt * fps)))
 
-        # Use the default perspective camera (same one set_camera_view controls)
-        import omni.usd
-        from pxr import UsdGeom, Gf
-        stage = omni.usd.get_context().get_stage()
-
-        # Find the active camera - try common paths
-        self._cam_path = None
-        for cam_candidate in ["/OmniverseKit_Persp", "/World/Camera", "/Camera"]:
-            prim = stage.GetPrimAtPath(cam_candidate)
-            if prim.IsValid():
-                self._cam_path = cam_candidate
-                break
-
-        # If no camera found, create one
-        if self._cam_path is None:
-            self._cam_path = "/World/RecordCamera"
-            cam_prim = stage.DefinePrim(self._cam_path, "Camera")
-            cam = UsdGeom.Camera(cam_prim)
-            cam.GetFocalLengthAttr().Set(24.0)
-            cam.GetHorizontalApertureAttr().Set(20.955)
-            cam.GetClippingRangeAttr().Set(Gf.Vec2f(0.1, 1000.0))
-            print(f"[VIDEO] Created camera: {self._cam_path}")
-        else:
-            print(f"[VIDEO] Using existing camera: {self._cam_path}")
-
-        # Create render product + annotator
-        import omni.replicator.core as rep
-        self._rp = rep.create.render_product(self._cam_path, (width, height))
-        self._rgb_annot = rep.AnnotatorRegistry.get_annotator("rgb")
-        self._rgb_annot.attach([self._rp])
-
-        print(f"[VIDEO] Recorder initialized: {fps} FPS, {width}x{height}, "
+        from omni.kit.viewport.utility import get_active_viewport
+        self.viewport = get_active_viewport()
+        print(f"[VIDEO] Recorder initialized: {fps} FPS, "
               f"capture every {self._capture_interval} sim steps, "
               f"frames -> {self.frame_dir}")
 
     def set_camera_pose(self, eye: tuple, target: tuple):
-        """Update the camera using set_camera_view (works with default cam).
-
-        If using /OmniverseKit_Persp, set_camera_view already controls it.
-        If using a custom camera, we set the transform via USD xform ops.
-        """
-        # set_camera_view updates the default viewport camera
-        # Since our render product is attached to that same camera, it works
+        """Update the viewport camera position."""
         try:
             from isaacsim.core.utils.viewports import set_camera_view
-            set_camera_view(
-                eye=list(eye),
-                target=list(target),
-                camera_prim_path=self._cam_path,
-            )
+            set_camera_view(eye=list(eye), target=list(target))
         except Exception:
             pass
 
@@ -196,21 +149,12 @@ class VideoRecorder:
         """Call after every sim step. Captures frame at correct interval."""
         self._sim_step += 1
         if self._sim_step % self._capture_interval == 0:
-            data = self._rgb_annot.get_data()
-            if data is not None and data.size > 0:
-                import numpy as np
-                from PIL import Image
-                # Annotator returns RGBA or RGB — take first 3 channels
-                if len(data.shape) == 3 and data.shape[2] >= 3:
-                    rgb = data[:, :, :3]
-                else:
-                    rgb = data
-                img = Image.fromarray(rgb.astype(np.uint8))
-                frame_path = os.path.join(
-                    self.frame_dir, f"frame_{self.frame_count:06d}.png"
-                )
-                img.save(frame_path)
-                self.frame_count += 1
+            from omni.kit.viewport.utility import capture_viewport_to_file
+            frame_path = os.path.join(
+                self.frame_dir, f"frame_{self.frame_count:06d}.png"
+            )
+            capture_viewport_to_file(self.viewport, frame_path)
+            self.frame_count += 1
 
     def finalize(self, output_name: str = "demo_pickup.mp4"):
         """Merge frames into MP4 with ffmpeg."""
