@@ -65,6 +65,9 @@ class SkillExecutor:
         self._hold_pos_xy: Optional[torch.Tensor] = None
         self._hold_yaw: Optional[torch.Tensor] = None
 
+        # Per-env active tracking: fallen envs get zero velocity, excluded from success
+        self.env_active = torch.ones(env.num_envs, dtype=torch.bool, device=self.device)
+
         # Skill dispatch table
         self._skills = {
             "walk_to": self._execute_walk_to,
@@ -129,6 +132,82 @@ class SkillExecutor:
         hold_cmd = torch.stack([vx, vy, vyaw], dim=-1)
         return hold_cmd, drift
 
+    def _settle_velocity(self, max_steps: int = 30, vel_thresh: float = 0.3,
+                         angvel_thresh: float = 0.5) -> int:
+        """Zero-velocity settling between phase transitions.
+
+        Sends zero velocity commands until robot calms down.
+        Prevents cascade velocity accumulation across phases.
+
+        Returns:
+            Number of steps taken to settle.
+        """
+        env = self.env
+        arm_targets = self._hold_arm_targets
+        if arm_targets is None:
+            arm_targets = env.robot.data.joint_pos[:, env._arm_idx].clone()
+
+        settled_at = max_steps
+        for i in range(max_steps):
+            if not self._is_running():
+                break
+            obs = env.step_manipulation(self._stand_cmd, arm_targets)
+
+            max_vel = env.robot.data.root_lin_vel_w[:, :2].norm(dim=-1).max().item()
+            max_angvel = env.robot.data.root_ang_vel_w[:, 2].abs().max().item()
+            if max_vel < vel_thresh and max_angvel < angvel_thresh:
+                settled_at = i + 1
+                break
+
+        # Update env_active after settling
+        self._update_env_active()
+
+        max_vel = env.robot.data.root_lin_vel_w[:, :2].norm(dim=-1).max().item()
+        max_angvel = env.robot.data.root_ang_vel_w[:, 2].abs().max().item()
+        active = self.env_active.sum().item()
+        print(f"  [Settle] {settled_at} steps | vel={max_vel:.3f} | angvel={max_angvel:.3f} | "
+              f"active={active}/{env.num_envs}")
+        return settled_at
+
+    def _update_env_active(self):
+        """Mark fallen envs (h < 0.4) as inactive."""
+        heights = self.env.robot.data.root_pos_w[:, 2]
+        fallen = heights < 0.4
+        newly_fallen = fallen & self.env_active
+        if newly_fallen.any():
+            count = newly_fallen.sum().item()
+            print(f"  [EnvActive] {count} env(s) newly fallen, marking inactive")
+        self.env_active[fallen] = False
+
+    def _get_robot_state(self) -> dict:
+        """Robot state summary for VLM re-planning."""
+        env = self.env
+        root_pos = env.robot.data.root_pos_w
+        root_quat = env.robot.data.root_quat_w
+        yaw = get_yaw_from_quat(root_quat)
+        holding = getattr(env, '_object_attached', False)
+        return {
+            "position": root_pos[0, :3].tolist(),
+            "height": root_pos[0, 2].item(),
+            "heading_deg": math.degrees(yaw[0].item()),
+            "holding": holding,
+            "velocity": env.robot.data.root_lin_vel_w[0, :2].norm().item(),
+            "per_env_active": self.env_active.tolist(),
+        }
+
+    def _get_per_env_status(self) -> list:
+        """Per-env status for VLM re-planning."""
+        env = self.env
+        heights = env.robot.data.root_pos_w[:, 2]
+        return [
+            {
+                "env_id": i,
+                "active": self.env_active[i].item(),
+                "height": heights[i].item(),
+            }
+            for i in range(env.num_envs)
+        ]
+
     def execute_plan(self, plan: list) -> dict:
         """Execute a sequence of skill steps.
 
@@ -154,6 +233,10 @@ class SkillExecutor:
             print(f"  Step {i+1}/{len(plan)}: {skill_name}({params})")
             print(f"{'-'*50}")
 
+            # Velocity settling between phases (prevents cascade velocity accumulation)
+            if i > 0:
+                self._settle_velocity()
+
             # Update semantic map for latest positions
             self.semantic_map.update()
 
@@ -167,17 +250,37 @@ class SkillExecutor:
             results.append({"skill": skill_name, "params": params, "result": result})
             print(f"  -> {skill_name}: {result['status']} ({result.get('reason', '')})")
 
+            # Update env_active after each skill
+            self._update_env_active()
+
             if result["status"] == "failed":
                 print(f"\n  [Executor] PLAN FAILED at step {i+1}")
-                break
+                return {
+                    "success": False,
+                    "steps_completed": i,
+                    "failed_step": step,
+                    "plan_results": results,
+                    "completed": False,
+                    "robot_state": self._get_robot_state(),
+                    "per_env_status": self._get_per_env_status(),
+                }
 
         completed = all(r["result"]["status"] == "success" for r in results)
         print(f"\n{'='*60}")
         print(f"  PLAN {'COMPLETED' if completed else 'INCOMPLETE'}")
         print(f"  Results: {sum(1 for r in results if r['result']['status'] == 'success')}/{len(results)} succeeded")
+        active = self.env_active.sum().item()
+        print(f"  Active envs: {active}/{self.env.num_envs}")
         print(f"{'='*60}")
 
-        return {"plan_results": results, "completed": completed}
+        return {
+            "success": completed,
+            "steps_completed": len(results),
+            "plan_results": results,
+            "completed": completed,
+            "robot_state": self._get_robot_state(),
+            "per_env_status": self._get_per_env_status(),
+        }
 
     # ------------------------------------------------------------------
     # walk_to: Navigate to object/surface using WalkToSkill
@@ -360,6 +463,10 @@ class SkillExecutor:
                     break
                 obs = env.step_manipulation(self._stand_cmd, arm_targets)
 
+        # Per-env tracking
+        env_reached = torch.zeros(env.num_envs, dtype=torch.bool, device=self.device)
+        env_fallen = ~self.env_active.clone()  # inherit already-fallen state
+
         for step in range(max_steps):
             if not self._is_running():
                 break
@@ -368,17 +475,32 @@ class SkillExecutor:
             root_quat = env.robot.data.root_quat_w
             base_h = root_pos[:, 2]
 
-            # Per-env distance, filtered for standing robots
+            # Update per-env status
+            newly_fallen = (base_h < 0.4) & ~env_fallen
+            env_fallen |= (base_h < 0.4)
+            self.env_active[env_fallen] = False
+
+            # Per-env distance
             delta = target_xy - root_pos[:, :2]
             dist_per_env = delta.norm(dim=-1)
-            standing_mask = base_h > MIN_H
+
+            # Mark standing envs that reached target
+            standing_mask = ~env_fallen
+            reached_now = (dist_per_env < stop_distance) & standing_mask
+            env_reached |= reached_now
+
+            # Success: majority of standing envs reached target
+            standing_count = standing_mask.sum().item()
+            reached_count = env_reached.sum().item()
+            if standing_count > 0 and reached_count >= max(1, (standing_count + 1) // 2):
+                effective_dist = dist_per_env[standing_mask].mean().item() if standing_mask.any() else float('inf')
+                break
+
+            # Effective distance: only standing envs
             if standing_mask.any():
                 effective_dist = dist_per_env[standing_mask].mean().item()
             else:
                 effective_dist = dist_per_env.mean().item()
-
-            if effective_dist < stop_distance:
-                break
 
             # Body-frame direction to target
             yaw = get_yaw_from_quat(root_quat)
@@ -393,14 +515,15 @@ class SkillExecutor:
 
             if carrying:
                 # CARRY mode: omnidirectional at reduced velocities
-                # Pre-walk yaw correction already handled initial alignment
-                vx = (dx_body * 0.8).clamp(-0.30, 0.30)
-                vy = (dy_body * 0.5).clamp(-0.15, 0.15)
-                vyaw = (heading_err * 0.5).clamp(-0.25, 0.25)
+                # Scale forward velocity by heading alignment to prevent spiraling
+                alignment = torch.cos(heading_err).clamp(0.0, 1.0)  # 1.0 = facing target
+                vx = (dx_body * 0.8 * alignment).clamp(-0.35, 0.35)
+                vy = (dy_body * 0.5).clamp(-0.20, 0.20)
+                vyaw = (heading_err * 0.6).clamp(-0.30, 0.30)
 
-                # Gentle ramp-up over first 50 steps
-                if step < 50:
-                    ramp = 0.3 + 0.7 * (step / 50.0)  # 0.3 → 1.0
+                # Gentle ramp-up over first 30 steps (0.5 → 1.0)
+                if step < 30:
+                    ramp = 0.5 + 0.5 * (step / 30.0)
                     vx = vx * ramp
                     vy = vy * ramp
                     vyaw = vyaw * ramp
@@ -410,29 +533,35 @@ class SkillExecutor:
                 vy = (dy_body * 0.6).clamp(-0.20, 0.20)
                 vyaw = (heading_err * 0.5).clamp(-0.3, 0.3)
 
+            # Zero velocity for fallen envs (don't waste policy capacity)
             vel_cmd = torch.stack([vx, vy, vyaw], dim=-1)
+            vel_cmd = torch.where(self.env_active.unsqueeze(-1), vel_cmd, self._stand_cmd)
             obs = env.step_manipulation(vel_cmd, arm_targets)
 
             if step % 50 == 0:
                 h = obs["base_height"].mean().item()
-                stand_count = (obs["base_height"] > MIN_H).sum().item()
+                stand_count = standing_mask.sum().item()
                 per_env = ", ".join(
-                    f"e{i}={dist_per_env[i]:.2f}" for i in range(env.num_envs)
+                    f"e{i}={dist_per_env[i]:.2f}{'*' if env_reached[i] else ''}{'X' if env_fallen[i] else ''}"
+                    for i in range(env.num_envs)
                 )
                 print(
                     f"  [OmniWalk] Step {step} | dist={effective_dist:.2f}m "
                     f"[{per_env}] | h={h:.2f} | "
-                    f"stand={stand_count}/{env.num_envs} | "
+                    f"stand={stand_count}/{env.num_envs} | reached={reached_count} | "
                     f"cmd=[{vx[0]:.2f},{vy[0]:.2f},{vyaw[0]:.2f}]"
                 )
 
-            if (obs["base_height"] < 0.2).all():
+            if env_fallen.all():
                 return {"status": "failed", "reason": "All robots fell during omni walk"}
 
         walk_time = time.time() - start_time
+        reached_count = env_reached.sum().item()
+        standing_count = (~env_fallen).sum().item()
         print(
-            f"  [OmniWalk] Finished in {walk_time:.1f}s, {step + 1} steps, "
-            f"dist={effective_dist:.2f}m"
+            f"  [OmniWalk] Finished in {walk_time:.1f}s, {step + 1} steps | "
+            f"reached={reached_count}/{env.num_envs} | "
+            f"standing={standing_count}/{env.num_envs}"
         )
 
         # Stabilize
@@ -442,10 +571,13 @@ class SkillExecutor:
                 break
             obs = env.step_manipulation(self._stand_cmd, arm_targets)
 
-        if effective_dist < stop_distance:
-            return {"status": "success", "reason": f"Reached within {stop_distance}m of {target_name}"}
+        # Success if majority of standing envs reached
+        if standing_count > 0 and reached_count >= max(1, (standing_count + 1) // 2):
+            return {"status": "success", "reason": f"{reached_count}/{standing_count} standing envs reached {target_name}"}
+        elif standing_count == 0:
+            return {"status": "failed", "reason": "All robots fell"}
         else:
-            return {"status": "failed", "reason": f"OmniWalk timeout at {effective_dist:.2f}m"}
+            return {"status": "failed", "reason": f"OmniWalk: only {reached_count}/{standing_count} standing envs reached (need majority)"}
 
     # ------------------------------------------------------------------
     # walk_to_position: Navigate to specific world coordinates
@@ -711,8 +843,8 @@ class SkillExecutor:
         env.enable_arm_policy(False)
         self._hold_arm_targets = env.robot.data.joint_pos[:, env._arm_idx].clone()
 
-        REACH_HOLD_MIN = 20   # minimum hold steps for stability
-        REACH_HOLD_MAX = 60   # maximum hold steps
+        REACH_HOLD_MIN = 10   # minimum hold steps for stability
+        REACH_HOLD_MAX = 30   # maximum hold steps (was 60 — reduced to limit drift)
         HOLD_VEL_THRESH = 0.20
         HOLD_ANGVEL_THRESH = 0.3
 
