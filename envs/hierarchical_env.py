@@ -333,8 +333,9 @@ class HierarchicalSceneCfg(InteractiveSceneCfg):
 
     # -- Steering wheel on table (near front edge, right-arm reachable) --
     # Table rotated 90deg CW: narrow end faces robot, long axis along Y
-    # Place near the front edge (x=2.75), slightly right of center (y=-0.10)
     # Table surface extends roughly x=[2.6, 3.4], y=[-0.85, 0.85]
+    # Basket is at table center (~x=3.0, y=0.0)
+    # Place object at front-right corner — AWAY from basket for clear pick-and-place demo
     pickup_object: RigidObjectCfg = RigidObjectCfg(
         prim_path="{ENV_REGEX_NS}/Object",
         spawn=sim_utils.UsdFileCfg(
@@ -346,7 +347,7 @@ class HierarchicalSceneCfg(InteractiveSceneCfg):
             ),
         ),
         init_state=RigidObjectCfg.InitialStateCfg(
-            pos=(2.75, -0.10, 0.72),  # On table surface, near front edge
+            pos=(2.70, -0.45, 0.72),  # Front-right of table, away from basket
         ),
     )
 
