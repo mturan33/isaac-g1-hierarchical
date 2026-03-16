@@ -58,6 +58,18 @@ parser.add_argument(
     "--ollama_url", type=str, default="http://localhost:11434",
     help="Ollama API URL",
 )
+parser.add_argument(
+    "--record", action="store_true",
+    help="Record video frames (viewport capture → ffmpeg merge)",
+)
+parser.add_argument(
+    "--record_dir", type=str, default="videos/demo_frames",
+    help="Directory to save recorded frames",
+)
+parser.add_argument(
+    "--record_fps", type=int, default=25,
+    help="Target FPS for recording (captures every N-th sim step)",
+)
 AppLauncher.add_app_launcher_args(parser)
 args_cli = parser.parse_args()
 
