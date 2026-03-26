@@ -1,15 +1,15 @@
-# Hierarchical VLM+RL Pick-and-Place for G1 Humanoid
+# Hierarchical RL Pick-and-Place for G1 Humanoid
 
 End-to-end autonomous pick-and-place on the Unitree G1 (29 DoF) in NVIDIA Isaac Lab.
-A natural-language command drives a VLM planner that sequences RL skill primitives
--- walk, reach, grasp, lift, carry, lower, place -- executed by cascaded locomotion
-and manipulation policies trained entirely in simulation.
+A rule-based state machine decomposes the task into 8 sequential RL skill primitives
+-- walk, reach, grasp, lift, carry, lower, place -- executed by a triple-policy cascade
+(locomotion + arm + finger) trained entirely in simulation.
 
 https://github.com/user-attachments/assets/placeholder-video-link
 
 ## Key Results
 
-- **8/8 skill steps** completed autonomously in ~90 s (sim time)
+- **8/8 skill steps** completed autonomously in ~100 s (sim time)
 - **Zero falls** during full pick-carry-place trajectory
 - Lateral carry walk with Pure Pursuit controller (no rotation, pure strafe)
 - Magnetic grasp attaches at 0.21 m with orientation preservation
@@ -108,7 +108,7 @@ high_low_hierarchical_g1/
 │   └── hierarchical_env.py      # Main env: policy cascade, magnetic grasp, mode switching
 ├── planning/
 │   ├── skill_executor.py        # Walk controller (Pure Pursuit), reach, grasp, lift, lower, place
-│   ├── vlm_planner.py           # Task decomposition (simple rule-based + VLM)
+│   ├── vlm_planner.py           # Task decomposition (rule-based state machine)
 │   └── semantic_map.py          # Ground-truth object/surface positions
 ├── low_level/
 │   ├── policy_wrapper.py        # Loco policy inference wrapper
@@ -156,4 +156,5 @@ correction is skipped for lateral-only walks.
 - Ahn et al. 2022 -- SayCan: VLM + affordance scoring for robot task planning
 - Ouyang et al. 2024 -- Berkeley Loco-Manipulation: skill chaining + VLM cascade
 - Gu et al. 2025 (RSS) -- HOMIE: height-coupled knee reward for humanoid locomotion
+- Coulter 1992 -- Pure Pursuit path tracking for mobile robots
 - unitree_rl_lab -- G1 29-DoF locomotion training framework
