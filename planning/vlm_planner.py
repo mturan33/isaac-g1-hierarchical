@@ -1,12 +1,13 @@
 """
 VLM Task Planner
 =================
-Local VLM-based task planner using Qwen2.5-VL via Ollama,
+Local VLM-based task planner using Qwen3-VL via Ollama (streaming),
 plus a rule-based SimplePlanner fallback.
 
-VLMPlanner:
-    - Connects to local Ollama instance
-    - Sends semantic map JSON + optional RGB image
+OllamaVLMPlanner:
+    - Connects to local Ollama instance via `ollama` Python package
+    - Sends semantic map JSON + task as structured messages
+    - Streams reasoning (<think> blocks) live to terminal
     - Receives structured skill plan as JSON
 
 SimplePlanner:
@@ -19,174 +20,303 @@ from __future__ import annotations
 
 import json
 import re
+import sys
+import time
 from typing import Optional
-
-# Ollama HTTP client (requests is optional)
-try:
-    import requests
-    _HAS_REQUESTS = True
-except ImportError:
-    _HAS_REQUESTS = False
 
 
 # Available skills for validation
-AVAILABLE_SKILLS = {"walk_to", "pre_reach", "reach", "grasp", "lift", "lateral_walk", "lower", "place", "walk_to_position"}
+AVAILABLE_SKILLS = {
+    "walk_to", "pre_reach", "reach", "grasp", "lift",
+    "lateral_walk", "lower", "place", "walk_to_position",
+}
+
+# ============================================================================
+# System prompt — skill library + constraints for VLM
+# ============================================================================
+
+VLM_SYSTEM_PROMPT = """\
+You are a Unitree G1 humanoid robot task planner operating in NVIDIA Isaac Sim.
+You receive the current world state (robot position, objects, surfaces) and must
+generate a sequence of skill primitives to accomplish the given task.
+
+AVAILABLE SKILLS (use exactly these names):
+
+1. pre_reach(target: str)
+   Raise arm to high position before approaching the table.
+   MUST be called BEFORE the first walk_to to avoid arm-table collision.
+   target: object ID to prepare for (e.g. "object_01")
+
+2. walk_to(target: str, stop_distance: float, hold_arm: bool)
+   Walk to an object or surface.
+   - target: object or surface ID (e.g. "object_01", "table_01")
+   - stop_distance: how far to stop from target center.
+     Use 0.40 for approaching objects on a table.
+     Use 0.20 for basket/placement approach (need to get close).
+   - hold_arm: true to keep arm frozen in current position during walk.
+     MUST be true after pre_reach and when carrying an object.
+
+3. reach(target: str)
+   Extend right arm toward target object using RL arm policy.
+   Magnetic grasp triggers automatically at 0.21m distance.
+   target: object ID to reach for.
+
+4. grasp()
+   Close fingers around the object. Call after reach.
+   No parameters needed.
+
+5. lift()
+   Raise arm straight up after grasping, lifting the object above table height.
+   No parameters needed.
+
+6. lower()
+   Lower arm to table/basket level for placing the object.
+   No parameters needed.
+
+7. place()
+   Open fingers to release held object, return arm to default position.
+   No parameters needed.
+
+CRITICAL CONSTRAINTS:
+- ALWAYS call pre_reach BEFORE the first walk_to (arm must be raised before approaching table)
+- Walk with hold_arm=true after pre_reach or when carrying an object
+- Robot can only carry ONE object at a time
+- After lift, use walk_to with target="table_01" and stop_distance=0.20 to reach the basket
+  (basket is ON the table, so table is the walk target)
+- The standard pick-and-place sequence is:
+  pre_reach -> walk_to(object) -> reach -> grasp -> lift -> walk_to(table) -> lower -> place
+- Use EXACT IDs from the world state (e.g. "object_01", "table_01"), not abbreviations
+
+OUTPUT FORMAT:
+Return ONLY a JSON object with a "plan" key containing an array of steps:
+{"plan": [{"skill": "skill_name", "params": {"param1": "value1", ...}}, ...]}
+
+Do NOT include any text outside the JSON object.\
+"""
 
 
-class VLMPlanner:
-    """Task planner using local VLM (Qwen2.5-VL) via Ollama.
+# ============================================================================
+# OllamaVLMPlanner — streaming VLM with live reasoning display
+# ============================================================================
+
+class OllamaVLMPlanner:
+    """Task planner using local VLM (Qwen3-VL) via Ollama with streaming reasoning.
 
     Args:
-        model: Ollama model name (default: "qwen2.5vl:7b")
-        ollama_url: Ollama API base URL
-        timeout: Request timeout in seconds
+        model: Ollama model name (default: "qwen3-vl:4b")
+        stream_reasoning: If True, print <think> blocks live to stderr
     """
 
     def __init__(
         self,
-        model: str = "qwen2.5vl:7b",
-        ollama_url: str = "http://localhost:11434",
-        timeout: int = 60,
+        model: str = "qwen3-vl:4b",
+        stream_reasoning: bool = True,
     ):
         self.model = model
-        self.url = ollama_url
-        self.timeout = timeout
+        self.stream_reasoning = stream_reasoning
 
-        if not _HAS_REQUESTS:
-            print("[VLMPlanner] WARNING: 'requests' not installed. VLM planning unavailable.")
+        try:
+            import ollama as _ollama
+            self._ollama = _ollama
+        except ImportError:
+            print("[VLMPlanner] ERROR: 'ollama' package not installed. Run: pip install ollama")
+            self._ollama = None
 
     def plan(
         self,
         task: str,
         semantic_map_json: dict,
-        rgb_image: Optional[str] = None,
+        image_path: Optional[str] = None,
     ) -> Optional[list]:
         """Generate a skill plan from a natural language task.
 
         Args:
             task: Natural language task description
             semantic_map_json: World state from SemanticMap.get_json()
-            rgb_image: Optional base64-encoded RGB image
+            image_path: Optional path to RGB image from viewport
 
         Returns:
-            List of skill steps [{skill, params}, ...] or None if failed
+            List of skill steps [{"skill": ..., "params": {...}}, ...] or None
         """
-        if not _HAS_REQUESTS:
+        if self._ollama is None:
             return None
 
-        prompt = self._build_prompt(task, semantic_map_json)
+        messages = self._build_messages(task, semantic_map_json, image_path)
 
         try:
-            payload = {
-                "model": self.model,
-                "prompt": prompt,
-                "format": "json",
-                "stream": False,
-            }
-            if rgb_image is not None:
-                payload["images"] = [rgb_image]
+            t0 = time.time()
+            full_response = self._stream_chat(messages)
+            elapsed = time.time() - t0
+            print(f"\n[VLM] Response received in {elapsed:.1f}s", file=sys.stderr)
 
-            response = requests.post(
-                f"{self.url}/api/generate",
-                json=payload,
-                timeout=self.timeout,
-            )
-            response.raise_for_status()
+            plan = self._parse_response(full_response)
+            if plan and self._validate_plan(plan, task):
+                print(f"[VLM] Valid plan: {len(plan)} steps", file=sys.stderr)
+                for i, step in enumerate(plan):
+                    params_str = ", ".join(f"{k}={v}" for k, v in step.get("params", {}).items())
+                    print(f"  {i+1}. {step['skill']}({params_str})", file=sys.stderr)
+                self._unload_model()
+                return plan
+            else:
+                print("[VLM] Plan validation failed", file=sys.stderr)
+                self._unload_model()
+                return None
 
-            result = response.json()
-            plan = self._parse_response(result)
-            return plan
-
-        except requests.ConnectionError:
-            print(f"[VLMPlanner] Cannot connect to Ollama at {self.url}")
-            return None
-        except requests.Timeout:
-            print(f"[VLMPlanner] Ollama request timed out ({self.timeout}s)")
-            return None
         except Exception as e:
-            print(f"[VLMPlanner] Error: {e}")
+            print(f"[VLM] Error: {e}", file=sys.stderr)
+            self._unload_model()
             return None
 
-    def _build_prompt(self, task: str, semantic_map: dict) -> str:
-        """Build few-shot prompt with skill library and world state."""
-        return f"""You are a robot task planner for a Unitree G1 humanoid robot.
+    def _unload_model(self):
+        """Unload model from GPU to free VRAM for Isaac Sim."""
+        try:
+            self._ollama.chat(
+                model=self.model,
+                messages=[{"role": "user", "content": "x"}],
+                keep_alive="0",
+            )
+            print(f"[VLM] Model unloaded from GPU", file=sys.stderr)
+        except Exception:
+            pass  # Best effort
 
-AVAILABLE SKILLS:
-- pre_reach(target): Raise arm HIGH before approaching table. MUST be called BEFORE walk_to to avoid table collision.
-- walk_to(target, stop_distance, hold_arm): Walk to object/surface. Use hold_arm=true after pre_reach.
-- reach(target): Extend right arm DOWN toward target object using RL policy + magnetic attach at 10cm.
-- grasp(): Close fingers to grasp object.
-- lift(): Raise arm straight up above basket height after grasping.
-- lateral_walk(direction, distance, speed): Walk sideways while holding object. direction="right"/"left". speed=0.10 for stability.
-- lower(): Lower arm into basket/container after positioning above it.
-- place(): Open fingers to release held object, return arm to default.
-- walk_to_position(x, y): Walk to specific world coordinates.
-
-ROBOT STATE:
+    def _build_messages(self, task: str, semantic_map: dict, image_path: Optional[str]) -> list:
+        """Build chat messages with system prompt + user context."""
+        user_content = f"""CURRENT WORLD STATE:
 {json.dumps(semantic_map, indent=2)}
 
 TASK: {task}
 
-IMPORTANT RULES:
-1. ALWAYS pre_reach BEFORE walk_to (raise arm before approaching table)
-2. Walk with hold_arm=true after pre_reach, stop_distance=0.40 (table blocks closer)
-3. Arm workspace is 0.55m - robot must be close (stop_distance=0.40)
-4. Always reach before grasping
-5. Output ONLY valid JSON
+Generate the skill plan as JSON."""
 
-OUTPUT FORMAT (JSON object with "plan" key containing array):
-{{"plan": [{{"skill": "skill_name", "params": {{...}}}}]}}"""
+        user_msg = {"role": "user", "content": user_content}
 
-    def _parse_response(self, response: dict) -> Optional[list]:
-        """Parse and validate Ollama response."""
+        # Attach image if provided
+        if image_path is not None:
+            user_msg["images"] = [image_path]
+
+        return [
+            {"role": "system", "content": VLM_SYSTEM_PROMPT},
+            user_msg,
+        ]
+
+    def _stream_chat(self, messages: list) -> str:
+        """Stream response from Ollama, display reasoning live, return full text."""
+        full_response = ""
+        in_think = False
+        think_printed_header = False
+
+        for chunk in self._ollama.chat(model=self.model, messages=messages, stream=True, format="json"):
+            token = chunk['message']['content']
+            full_response += token
+
+            if self.stream_reasoning:
+                # Detect <think> blocks (Qwen3 reasoning)
+                if '<think>' in token:
+                    in_think = True
+                    if not think_printed_header:
+                        print("\n\033[90m[VLM Reasoning]\033[0m", file=sys.stderr)
+                        think_printed_header = True
+                    # Print remainder after <think> tag
+                    after = token.split('<think>', 1)[1]
+                    if after:
+                        print(f"\033[90m{after}\033[0m", end='', flush=True, file=sys.stderr)
+                elif '</think>' in token:
+                    # Print text before </think>
+                    before = token.split('</think>', 1)[0]
+                    if before:
+                        print(f"\033[90m{before}\033[0m", end='', flush=True, file=sys.stderr)
+                    in_think = False
+                    print(f"\n\033[92m[VLM Plan Output]\033[0m", file=sys.stderr)
+                elif in_think:
+                    print(f"\033[90m{token}\033[0m", end='', flush=True, file=sys.stderr)
+
+        return full_response
+
+    def _parse_response(self, text: str) -> Optional[list]:
+        """Parse JSON plan from VLM response (handles <think> blocks)."""
+        # Remove <think>...</think> blocks
+        clean = re.sub(r'<think>.*?</think>', '', text, flags=re.DOTALL).strip()
+
+        # Try to find JSON object
+        # Method 1: Direct parse
         try:
-            text = response.get("response", "")
-            data = json.loads(text)
+            data = json.loads(clean)
+            return self._extract_plan(data)
+        except json.JSONDecodeError:
+            pass
 
-            # Handle both {plan: [...]} and bare [...]
-            if isinstance(data, dict) and "plan" in data:
-                plan = data["plan"]
-            elif isinstance(data, list):
-                plan = data
-            else:
-                print(f"[VLMPlanner] Unexpected response format: {type(data)}")
-                return None
+        # Method 2: Find {...} block
+        match = re.search(r'\{.*\}', clean, re.DOTALL)
+        if match:
+            try:
+                data = json.loads(match.group())
+                return self._extract_plan(data)
+            except json.JSONDecodeError:
+                pass
 
-            # Validate each step
-            validated = []
-            for step in plan:
-                skill = step.get("skill", "")
-                if skill not in AVAILABLE_SKILLS:
-                    print(f"[VLMPlanner] Unknown skill: {skill}, skipping")
-                    continue
-                validated.append({
-                    "skill": skill,
-                    "params": step.get("params", {}),
-                })
+        # Method 3: Find ```json ... ``` block
+        match = re.search(r'```(?:json)?\s*(.*?)```', clean, re.DOTALL)
+        if match:
+            try:
+                data = json.loads(match.group(1))
+                return self._extract_plan(data)
+            except json.JSONDecodeError:
+                pass
 
-            if not validated:
-                print("[VLMPlanner] No valid skills in response")
-                return None
+        # Method 4: Find [...] array
+        match = re.search(r'\[.*\]', clean, re.DOTALL)
+        if match:
+            try:
+                arr = json.loads(match.group())
+                if isinstance(arr, list):
+                    return arr
+            except json.JSONDecodeError:
+                pass
 
-            return validated
+        print(f"[VLM] Could not parse JSON from response:\n{clean[:500]}", file=sys.stderr)
+        return None
 
-        except json.JSONDecodeError as e:
-            print(f"[VLMPlanner] JSON parse error: {e}")
-            # Try to extract JSON from text
-            text = response.get("response", "")
-            match = re.search(r'\[.*\]', text, re.DOTALL)
-            if match:
-                try:
-                    plan = json.loads(match.group())
-                    return [
-                        {"skill": s["skill"], "params": s.get("params", {})}
-                        for s in plan
-                        if s.get("skill") in AVAILABLE_SKILLS
-                    ] or None
-                except json.JSONDecodeError:
-                    pass
-            return None
+    def _extract_plan(self, data) -> Optional[list]:
+        """Extract plan list from parsed JSON (handles various formats)."""
+        if isinstance(data, dict) and "plan" in data:
+            return data["plan"]
+        elif isinstance(data, list):
+            return data
+        return None
 
+    def _validate_plan(self, plan: list, task: str) -> bool:
+        """Validate plan structure and required fields."""
+        if not plan or len(plan) < 2:
+            print(f"[VLM] Plan too short ({len(plan) if plan else 0} steps)", file=sys.stderr)
+            return False
+
+        validated = []
+        for i, step in enumerate(plan):
+            skill = step.get("skill", "")
+            if skill not in AVAILABLE_SKILLS:
+                print(f"[VLM] Step {i}: unknown skill '{skill}', removing", file=sys.stderr)
+                continue
+
+            # Check required params
+            params = step.get("params", {})
+            if skill in ("walk_to", "reach", "pre_reach") and "target" not in params:
+                print(f"[VLM] Step {i}: {skill} missing 'target' param", file=sys.stderr)
+                continue
+
+            validated.append({"skill": skill, "params": params})
+
+        if len(validated) < 2:
+            return False
+
+        # Overwrite plan with validated steps
+        plan.clear()
+        plan.extend(validated)
+        return True
+
+
+# ============================================================================
+# SimplePlanner — Rule-based fallback (unchanged)
+# ============================================================================
 
 class SimplePlanner:
     """Rule-based fallback planner. No VLM required.
@@ -239,7 +369,7 @@ class SimplePlanner:
         return [
             # 1. Raise arm HIGH before approaching table (avoids collision)
             {"skill": "pre_reach", "params": {"target": target_obj["id"]}},
-            # 2. Walk to object with arm held up (0.25m — table blocks closer)
+            # 2. Walk to object with arm held up (0.25m -- table blocks closer)
             {"skill": "walk_to", "params": {"target": target_obj["id"], "stop_distance": 0.40, "hold_arm": True}},
             # 3. Reach down to object and magnetically attach (10cm threshold)
             {"skill": "reach", "params": {"target": target_obj["id"]}},
@@ -248,7 +378,7 @@ class SimplePlanner:
             # 5. Lift arm straight up above basket height
             {"skill": "lift", "params": {}},
             # 6. Walk laterally to basket (carry override keeps X, moves Y only)
-            # stop_distance=0.20 — get closer to basket center before placing
+            # stop_distance=0.20 -- get closer to basket center before placing
             {"skill": "walk_to", "params": {"target": "table_01", "stop_distance": 0.20, "hold_arm": True}},
             # 7. Lower arm into basket
             {"skill": "lower", "params": {}},

@@ -48,15 +48,15 @@ parser.add_argument(
 )
 parser.add_argument(
     "--planner", type=str, default="simple", choices=["simple", "vlm"],
-    help="Planner type: 'simple' (rule-based) or 'vlm' (Ollama Qwen2.5-VL)",
+    help="Planner type: 'simple' (rule-based) or 'vlm' (Ollama Qwen3-VL)",
 )
 parser.add_argument(
-    "--ollama_model", type=str, default="qwen2.5vl:7b",
-    help="Ollama model name for VLM planner",
+    "--vlm_model", type=str, default="qwen3-vl:4b",
+    help="Ollama model name for VLM planner (e.g. qwen3-vl:2b, qwen3-vl:4b, qwen3-vl:8b)",
 )
 parser.add_argument(
-    "--ollama_url", type=str, default="http://localhost:11434",
-    help="Ollama API URL",
+    "--no_stream", action="store_true",
+    help="Disable live VLM reasoning display",
 )
 parser.add_argument(
     "--record", action="store_true",
@@ -351,7 +351,7 @@ from high_low_hierarchical_g1.envs.hierarchical_env import (
     HierarchicalG1Env, HierarchicalSceneCfg, PHYSICS_DT, CONTROL_DT,
 )
 from high_low_hierarchical_g1.planning.semantic_map import SemanticMap
-from high_low_hierarchical_g1.planning.vlm_planner import VLMPlanner, SimplePlanner
+from high_low_hierarchical_g1.planning.vlm_planner import OllamaVLMPlanner, SimplePlanner
 from high_low_hierarchical_g1.planning.skill_executor import SkillExecutor
 
 
@@ -369,8 +369,8 @@ def main():
     print(f"  Loco ckpt  : {args_cli.checkpoint}")
     print(f"  Arm ckpt   : {args_cli.arm_checkpoint or 'None (heuristic)'}")
     if args_cli.planner == "vlm":
-        print(f"  VLM model  : {args_cli.ollama_model}")
-        print(f"  Ollama URL : {args_cli.ollama_url}")
+        print(f"  VLM model  : {args_cli.vlm_model}")
+        print(f"  Streaming  : {not args_cli.no_stream}")
     if args_cli.record:
         print(f"  Recording  : {args_cli.record_dir} @ {args_cli.record_fps} FPS")
     print("=" * 60)
@@ -466,10 +466,10 @@ def main():
     plan = None
 
     if args_cli.planner == "vlm":
-        print("[Demo] Using VLM planner (Ollama)...")
-        vlm = VLMPlanner(
-            model=args_cli.ollama_model,
-            ollama_url=args_cli.ollama_url,
+        print(f"[Demo] Using VLM planner ({args_cli.vlm_model})...")
+        vlm = OllamaVLMPlanner(
+            model=args_cli.vlm_model,
+            stream_reasoning=not args_cli.no_stream,
         )
         plan = vlm.plan(args_cli.task, world_json)
 

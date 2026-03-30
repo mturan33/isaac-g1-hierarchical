@@ -11,7 +11,7 @@ Components:
 """
 
 from .semantic_map import SemanticMap
-from .vlm_planner import VLMPlanner, SimplePlanner
+from .vlm_planner import OllamaVLMPlanner, SimplePlanner
 from .skill_executor import SkillExecutor
 
-__all__ = ["SemanticMap", "VLMPlanner", "SimplePlanner", "SkillExecutor"]
+__all__ = ["SemanticMap", "OllamaVLMPlanner", "SimplePlanner", "SkillExecutor"]
