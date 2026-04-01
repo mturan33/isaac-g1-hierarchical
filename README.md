@@ -143,6 +143,66 @@ The walk controller uses **Pure Pursuit** with two modes:
 Lateral mode maintains robot heading (vyaw = 0) and uses pure strafe. Pre-walk yaw
 correction is skipped for lateral-only walks.
 
+## Installation
+
+### Tested Configuration
+
+| Component | Version |
+|-----------|---------|
+| **OS** | Windows 11 Pro |
+| **GPU** | NVIDIA RTX 5070 Ti Laptop (Blackwell) |
+| **NVIDIA Driver** | 591.74 |
+| **Python** | 3.11 |
+| **Isaac Sim** | 5.1.0 |
+| **Isaac Lab** | 0.48.0 (`release/2.3.0`) |
+| **PyTorch** | 2.7.0+cu128 |
+| **h5py** | 3.11.0 |
+| **numpy** | 1.26.x |
+
+> **Driver Warning (Blackwell GPUs):** NVIDIA driver 595.79 causes Isaac Sim 5.1 GUI
+> to crash with an access violation in `omni.kit.menu.core`. Use driver **591.74** or
+> earlier 591.xx builds. Headless mode works with any driver version.
+
+### Setup Steps
+
+```bash
+# 1. Create conda environment
+conda create -n env_isaaclab python=3.11 -y
+conda activate env_isaaclab
+
+# 2. Install Isaac Sim 5.1
+pip install isaacsim==5.1.0 isaacsim-kernel==5.1.0 isaacsim-core==5.1.0 \
+    --extra-index-url https://pypi.nvidia.com
+
+# 3. Clone Isaac Lab and install
+git clone https://github.com/isaac-sim/IsaacLab.git
+cd IsaacLab
+git checkout release/2.3.0
+.\isaaclab.bat --install
+
+# 4. Fix h5py compatibility (Isaac Sim bundles older HDF5)
+pip install h5py==3.11.0 --force-reinstall --no-cache-dir
+pip install numpy==1.26.0
+
+# 5. (Optional) Install Ollama for VLM planner
+# Download from https://ollama.com, then:
+ollama pull qwen3-vl:2b
+```
+
+### Verify Installation
+
+```bash
+# Headless test (should complete 8/8 steps)
+.\isaaclab.bat -p source\isaaclab_tasks\isaaclab_tasks\direct\high_low_hierarchical_g1\scripts\demo_vlm_planning.py ^
+    --num_envs 1 --headless ^
+    --checkpoint <loco_checkpoint> ^
+    --arm_checkpoint <arm_checkpoint> ^
+    --task "Pick up the steering wheel from the table" --planner simple
+
+# GUI test (requires compatible driver)
+# Same command without --headless
+```
+
 ## Environment
 
 - **Simulation**: Isaac Lab / Isaac Sim 5.1.0 + PhysX
@@ -150,6 +210,16 @@ correction is skipped for lateral-only walks.
 - **Control frequency**: 50 Hz (4x decimation at 200 Hz physics)
 - **Objects**: Steering wheel on table, basket as placement target
 - **Grasp**: Magnetic attachment at 0.21 m distance
+
+## Troubleshooting
+
+| Problem | Cause | Fix |
+|---------|-------|-----|
+| GUI crash (access violation in `omni.kit.menu.core`) | NVIDIA driver 595.x + Blackwell GPU | Downgrade to driver 591.74 |
+| `ImportError: DLL load failed` on h5py | h5py 3.16+ incompatible with Isaac Sim HDF5 | `pip install h5py==3.11.0` |
+| `No module named 'isaacsim'` | Missing isaacsim packages | `pip install isaacsim-core==5.1.0 --extra-index-url https://pypi.nvidia.com` |
+| numpy version conflict | h5py install pulls numpy 2.x | `pip install numpy==1.26.0` |
+| "filename or extension is too long" | Windows MAX_PATH + long conda paths | Non-blocking; enable long paths in Windows registry |
 
 ## References
 
