@@ -355,6 +355,83 @@ from high_low_hierarchical_g1.planning.vlm_planner import OllamaVLMPlanner, Simp
 from high_low_hierarchical_g1.planning.skill_executor import SkillExecutor
 
 
+def _save_vlm_result(args, result, total_time, final_height, standing, num_envs, plan):
+    """Save VLM run result with auto-scoring to results/vlm_runs/."""
+    from datetime import datetime
+    import json as _json
+
+    results_dir = os.path.join(
+        os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+        "results", "vlm_runs",
+    )
+    os.makedirs(results_dir, exist_ok=True)
+
+    # --- Scoring (0-10) ---
+    plan_results = result.get("plan_results", [])
+    success_count = sum(1 for r in plan_results if r["result"]["status"] == "success")
+    total_steps = len(plan_results)
+
+    score = 0.0
+    # Step completion: 5 points max (proportional)
+    score += 5.0 * (success_count / max(total_steps, 1))
+    # Standing bonus: 2 points if robot still standing at end
+    if standing >= num_envs:
+        score += 2.0
+    elif standing > 0:
+        score += 1.0
+    # Speed bonus: 2 points max (under 60s = full, under 120s = half)
+    if total_time < 60:
+        score += 2.0
+    elif total_time < 120:
+        score += 1.0
+    # Plan quality: 1 point if VLM plan was used (not fallback)
+    vlm_used = not result.get("fallback", False)
+    if vlm_used:
+        score += 1.0
+    score = round(min(10.0, score), 1)
+
+    # --- Save ---
+    ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+    filename = f"{score}of10_{ts}.json"
+    filepath = os.path.join(results_dir, filename)
+
+    data = {
+        "score": score,
+        "timestamp": ts,
+        "task": args.task,
+        "planner": args.planner,
+        "vlm_model": getattr(args, "vlm_model", None),
+        "vlm_plan_used": vlm_used,
+        "total_time_s": round(total_time, 1),
+        "steps_succeeded": success_count,
+        "steps_total": total_steps,
+        "final_height_m": round(final_height, 3),
+        "standing": f"{standing}/{num_envs}",
+        "plan": [
+            {"skill": s["skill"], "params": s.get("params", {})}
+            for s in plan
+        ],
+        "step_results": [
+            {
+                "skill": r["skill"],
+                "status": r["result"]["status"],
+                "reason": r["result"].get("reason", ""),
+            }
+            for r in plan_results
+        ],
+        "scoring_breakdown": {
+            "completion": f"{success_count}/{total_steps} = {5.0 * success_count / max(total_steps, 1):.1f}/5",
+            "standing": f"{standing}/{num_envs} = {'2.0' if standing >= num_envs else '1.0' if standing > 0 else '0.0'}/2",
+            "speed": f"{total_time:.1f}s = {'2.0' if total_time < 60 else '1.0' if total_time < 120 else '0.0'}/2",
+            "vlm_plan": f"{'yes' if vlm_used else 'no'} = {'1.0' if vlm_used else '0.0'}/1",
+        },
+    }
+
+    with open(filepath, "w") as f:
+        _json.dump(data, f, indent=2)
+    print(f"\n[Results] Saved: {filename} (score: {score}/10)")
+
+
 def main():
     """Main VLM planning demo."""
     num_envs = args_cli.num_envs
@@ -465,6 +542,7 @@ def main():
     # ------------------------------------------------------------------
     print(f"\n[Demo] Planning: \"{args_cli.task}\"")
     plan = None
+    vlm_fallback = False
 
     if args_cli.planner == "vlm":
         print(f"[Demo] Using VLM planner ({args_cli.vlm_model})...")
@@ -476,6 +554,7 @@ def main():
 
         if plan is None:
             print("[Demo] VLM planner failed, falling back to SimplePlanner")
+            vlm_fallback = True
 
     if plan is None:
         print("[Demo] Using SimplePlanner (rule-based)...")
@@ -502,6 +581,7 @@ def main():
 
     start_time = time.time()
     result = executor.execute_plan(plan)
+    result["fallback"] = vlm_fallback
     total_time = time.time() - start_time
 
     # ------------------------------------------------------------------
@@ -527,6 +607,12 @@ def main():
     print(f"\n  Final height: {final_height:.2f}m")
     print(f"  Standing: {standing}/{num_envs}")
     print(f"{'='*60}")
+
+    # ------------------------------------------------------------------
+    # 7b. Save VLM run results
+    # ------------------------------------------------------------------
+    if args_cli.planner == "vlm":
+        _save_vlm_result(args_cli, result, total_time, final_height, standing, num_envs, plan)
 
     # ------------------------------------------------------------------
     # 8. Keep sim running briefly for visual inspection
