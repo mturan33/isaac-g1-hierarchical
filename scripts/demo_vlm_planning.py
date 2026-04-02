@@ -620,6 +620,8 @@ def main():
     # ------------------------------------------------------------------
     if args_cli.planner == "vlm":
         _save_vlm_result(args_cli, result, total_time, final_height, standing, num_envs, plan)
+        if vlm is not None:
+            vlm.unload_model()
 
     # ------------------------------------------------------------------
     # 8. Keep sim running briefly for visual inspection
