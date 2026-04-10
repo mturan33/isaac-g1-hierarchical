@@ -1308,7 +1308,7 @@ class SkillExecutor:
             # Check if we're grasping a drawer handle
             is_drawer = self._last_reach_target and "drawer" in self._last_reach_target
             if is_drawer:
-                attached = env.attach_drawer_to_hand(max_dist=0.50)
+                attached = env.attach_drawer_to_hand(max_dist=0.65)
             else:
                 attached = env.attach_object_to_hand(max_dist=0.27)
         else:
@@ -1830,11 +1830,12 @@ class SkillExecutor:
             arm_targets = env.arm_controller.get_targets()
 
             # Backward walk to physically pull the robot away from drawer
+            # Robot steps back while pulling — visible pull motion
             backward_cmd = self._stand_cmd.clone()
-            if progress < 0.3:
-                backward_cmd[:, 0] = -0.05  # Start gentle
+            if progress < 0.15:
+                backward_cmd[:, 0] = -0.05  # Brief gentle start
             else:
-                backward_cmd[:, 0] = -0.25  # Then pull hard
+                backward_cmd[:, 0] = -0.35  # Strong backward walk
             hold_cmd = backward_cmd
 
             # step_manipulation calls _update_attached_drawer internally

@@ -359,6 +359,7 @@ class HierarchicalSceneCfg(InteractiveSceneCfg):
         prim_path="{ENV_REGEX_NS}/Cabinet",
         spawn=sim_utils.UsdFileCfg(
             usd_path="C:/IsaacLab/source/isaaclab_tasks/isaaclab_tasks/direct/unitree_sim_isaaclab/assets/objects/drawers/cabinet_collider.usd",
+            scale=(1.3, 1.3, 1.3),  # 30% bigger — larger handles for G1 hands
             activate_contact_sensors=False,
             rigid_props=sim_utils.RigidBodyPropertiesCfg(
                 disable_gravity=False,
