@@ -192,6 +192,7 @@ class HierarchicalSceneCfg(InteractiveSceneCfg):
         ),
         init_state=ArticulationCfg.InitialStateCfg(
             pos=(0.0, 0.0, 0.80),
+            rot=(0.7071, 0.0, 0.0, 0.7071),  # 90deg CCW → face +Y (toward drawer)
             joint_pos=DEFAULT_ALL_POSES,
             joint_vel={".*": 0.0},
         ),

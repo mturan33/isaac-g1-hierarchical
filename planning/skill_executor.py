@@ -284,7 +284,7 @@ class SkillExecutor:
         hold_cmd = torch.stack([vx, vy, vyaw], dim=-1)
         return hold_cmd, drift
 
-    def _settle_velocity(self, max_steps: int = 30, vel_thresh: float = 0.3,
+    def _settle_velocity(self, max_steps: int = 15, vel_thresh: float = 0.3,
                          angvel_thresh: float = 0.5) -> int:
         """Zero-velocity settling between phase transitions.
 
@@ -603,8 +603,8 @@ class SkillExecutor:
             )
         else:
             pp_normal = PurePursuitController(
-                lookahead_distance=0.5, max_vx=0.40, max_vy=0.20,
-                max_vyaw=0.35, decel_radius=0.5, min_speed=0.08,
+                lookahead_distance=0.5, max_vx=0.60, max_vy=0.30,
+                max_vyaw=0.45, decel_radius=0.5, min_speed=0.10,
                 lateral_correction=0.25,
             )
 
@@ -1001,8 +1001,8 @@ class SkillExecutor:
         env.set_arm_target_world(pre_target_world)
         env.reset_arm_policy_state()
 
-        # Run arm policy for 60 steps (raise arm above table height)
-        for step in range(60):
+        # Run arm policy for 30 steps (raise arm above table height — fast mode)
+        for step in range(30):
             if not self._is_running():
                 break
             obs = env.step_arm_policy(self._stand_cmd)
@@ -1091,7 +1091,7 @@ class SkillExecutor:
             self._hold_pos_xy = hold_pos_xy
             self._hold_yaw = hold_yaw
 
-            reach_steps = 120
+            reach_steps = 60  # Fast mode — arm converges in ~40 steps
             for step in range(reach_steps):
                 if not self._is_running():
                     break
@@ -1127,10 +1127,10 @@ class SkillExecutor:
             # Switch to heuristic arm — freeze arm at current position
             env.enable_arm_policy(False)
 
-            # Stabilize briefly
+            # Stabilize briefly (fast)
             arm_targets = env.robot.data.joint_pos[:, env._arm_idx].clone()
             self._hold_arm_targets = arm_targets
-            for _ in range(15):
+            for _ in range(8):
                 if not self._is_running():
                     break
                 env.step_manipulation(self._stand_cmd, arm_targets)
@@ -1217,7 +1217,7 @@ class SkillExecutor:
         print(f"  [Reach] Hold position: [{hold_pos_xy[0,0]:.3f}, {hold_pos_xy[0,1]:.3f}], yaw={hold_yaw[0]:.3f}")
 
         # PID position holding during reach
-        reach_steps = 160
+        reach_steps = 100  # Fast mode (was 160)
         best_obj_dist = float('inf')
         best_ee_dist = float('inf')
         attached_during_reach = False
@@ -1379,7 +1379,7 @@ class SkillExecutor:
             print(f"  [Grasp] FAST mode (already attached): {finger_steps}+{hold_steps} steps, PID={pid_scale}")
         else:
             finger_steps = 20
-            hold_steps = 25
+            hold_steps = 15
             pid_scale = 0.8
             print(f"  [Grasp] NORMAL mode: {finger_steps}+{hold_steps} steps, PID={pid_scale}")
 
