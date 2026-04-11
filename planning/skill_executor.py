@@ -1091,7 +1091,7 @@ class SkillExecutor:
             self._hold_pos_xy = hold_pos_xy
             self._hold_yaw = hold_yaw
 
-            reach_steps = 80  # Arm converges at ~0.52m from handle
+            reach_steps = 60  # Arm converges quickly
             for step in range(reach_steps):
                 if not self._is_running():
                     break
@@ -1113,9 +1113,8 @@ class SkillExecutor:
                     h = obs["base_height"].mean().item()
                     print(f"  [Reach] Step {step:3d} | h={h:.2f} | EE->handle={ee_to_handle:.3f}m")
 
-                # Try attach — best distance arm achieves is ~0.50m from handle
-                # Robot stands at 0.85m, arm extends ~0.35m forward
-                if ee_to_handle < 0.55:
+                # Attach when arm extends toward handle
+                if ee_to_handle < 0.57:
                     attached = env.attach_drawer_to_hand(max_dist=0.60)
                     if attached:
                         print(f"  [Reach] ** Drawer handle LOCKED at step {step}! dist={ee_to_handle:.3f}m **")
