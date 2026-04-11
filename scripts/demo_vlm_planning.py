@@ -763,6 +763,36 @@ def main():
     print(f"[Demo] Object z after stabilize: {obj_z:.3f}m "
           f"({'ON TABLE' if obj_z > 0.4 else 'FELL OFF TABLE!'})")
 
+    # Hide pickup object during drawer tasks (prevents visual clutter)
+    if "drawer" in args_cli.task.lower() or "open" in args_cli.task.lower():
+        # Move far away AND disable visibility
+        hide_state = env.pickup_obj.data.default_root_state.clone()
+        hide_state[:, :3] = torch.tensor([50.0, 50.0, -10.0], device=device)
+        hide_state[:, 7:] = 0.0
+        env.pickup_obj.write_root_state_to_sim(hide_state)
+        # Also hide via USD visibility
+        try:
+            import omni.usd
+            from pxr import UsdGeom
+            stage = omni.usd.get_context().get_stage()
+            obj_prim = stage.GetPrimAtPath("/World/envs/env_0/PickupObject")
+            if obj_prim.IsValid():
+                UsdGeom.Imageable(obj_prim).MakeInvisible()
+                print("[Demo] Pickup object made invisible (USD)")
+            else:
+                # Try alternative paths
+                for path in ["/World/envs/env_0/pickup_object", "/World/envs/env_0/Object"]:
+                    p = stage.GetPrimAtPath(path)
+                    if p.IsValid():
+                        UsdGeom.Imageable(p).MakeInvisible()
+                        print(f"[Demo] Pickup object made invisible at {path}")
+                        break
+        except Exception as e:
+            print(f"[Demo] Could not hide object via USD: {e}")
+        env.sim.step()
+        env.scene.update(env.physics_dt)
+        print("[Demo] Pickup object hidden (drawer task)")
+
     # ------------------------------------------------------------------
     # 4. Create semantic map (ground truth mode)
     # ------------------------------------------------------------------
