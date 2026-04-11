@@ -395,8 +395,8 @@ class VLMOverlay:
         ui = self._ui
         self._window = ui.Window(
             "VLM Planner",
-            width=420, height=280,
-            position_x=15, position_y=15,
+            width=160, height=100,
+            position_x=10, position_y=10,
             flags=(ui.WINDOW_FLAGS_NO_RESIZE
                    | ui.WINDOW_FLAGS_NO_SCROLLBAR
                    | ui.WINDOW_FLAGS_NO_MOVE),
@@ -405,29 +405,29 @@ class VLMOverlay:
             with ui.ZStack():
                 # Semi-transparent background
                 ui.Rectangle(
-                    style={"background_color": ui.color(0, 0, 0, 0.7),
+                    style={"background_color": ui.color(0, 0, 0, 0.35),
                            "border_radius": 8}
                 )
                 with ui.VStack(spacing=4):
                     ui.Spacer(height=8)
-                    with ui.HStack(height=22):
+                    with ui.HStack(height=14):
                         ui.Spacer(width=12)
                         ui.Label("VLM Planner",
-                                 style={"font_size": 16, "color": ui.color(0.3, 1.0, 0.3)})
+                                 style={"font_size": 10, "color": ui.color(0.3, 1.0, 0.3)})
                     with ui.HStack():
                         ui.Spacer(width=12)
                         with ui.VStack():
                             self._plan_label = ui.Label(
                                 "Waiting for plan...",
                                 word_wrap=True,
-                                style={"font_size": 13, "color": ui.color(1, 1, 1, 0.9)},
+                                style={"font_size": 8, "color": ui.color(1, 1, 1, 0.9)},
                             )
                     ui.Spacer(height=4)
-                    with ui.HStack(height=20):
+                    with ui.HStack(height=12):
                         ui.Spacer(width=12)
                         self._status_label = ui.Label(
                             "",
-                            style={"font_size": 12, "color": ui.color(1.0, 0.8, 0.2)},
+                            style={"font_size": 8, "color": ui.color(1.0, 0.8, 0.2)},
                         )
                     ui.Spacer(height=6)
 
@@ -865,10 +865,7 @@ def main():
             vlm_overlay.set_status(f"[{symbol}] {skill_name}: {reason}")
 
             if status == "failed":
-                print(f"[CL] Skill failed, waiting for VLM replan...")
-                time.sleep(10)
-                if cl.get_next_step() is None:
-                    break
+                print(f"[CL] Skill failed, triggering VLM replan...")
 
         cl.stop()
         result = {

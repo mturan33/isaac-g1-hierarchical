@@ -1091,7 +1091,7 @@ class SkillExecutor:
             self._hold_pos_xy = hold_pos_xy
             self._hold_yaw = hold_yaw
 
-            reach_steps = 60  # Fast mode — arm converges in ~40 steps
+            reach_steps = 80  # Arm converges at ~0.52m from handle
             for step in range(reach_steps):
                 if not self._is_running():
                     break
@@ -1114,8 +1114,9 @@ class SkillExecutor:
                     print(f"  [Reach] Step {step:3d} | h={h:.2f} | EE->handle={ee_to_handle:.3f}m")
 
                 # Attach at full arm extension (dramatic pose)
-                if ee_to_handle < 0.85:
-                    attached = env.attach_drawer_to_hand(max_dist=0.90)
+                # Attach at closest achievable distance (arm reaches ~0.52m from handle)
+                if ee_to_handle < 0.55:
+                    attached = env.attach_drawer_to_hand(max_dist=0.60)
                     if attached:
                         print(f"  [Reach] ** Drawer handle LOCKED at step {step}! dist={ee_to_handle:.3f}m **")
                         # Record arm position for pull phase
@@ -1403,7 +1404,7 @@ class SkillExecutor:
         if not already_attached:
             is_drawer = self._last_reach_target and "drawer" in self._last_reach_target
             if is_drawer:
-                attached = env.attach_drawer_to_hand(max_dist=0.90)
+                attached = env.attach_drawer_to_hand(max_dist=0.60)
             else:
                 attached = env.attach_object_to_hand(max_dist=0.27)
         else:

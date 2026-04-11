@@ -360,7 +360,7 @@ class HierarchicalSceneCfg(InteractiveSceneCfg):
         prim_path="{ENV_REGEX_NS}/Cabinet",
         spawn=sim_utils.UsdFileCfg(
             usd_path="C:/IsaacLab/source/isaaclab_tasks/isaaclab_tasks/direct/unitree_sim_isaaclab/assets/objects/drawers/cabinet_collider.usd",
-            scale=(2.0, 2.0, 2.0),  # 2x scale for visible handles + dramatic distance
+            scale=(1.3, 1.3, 1.3),  # Original scale — handle scaled separately
             activate_contact_sensors=False,
             rigid_props=sim_utils.RigidBodyPropertiesCfg(
                 disable_gravity=False,
@@ -465,7 +465,8 @@ class HierarchicalG1Env:
         self.table: RigidObject = self.scene["table"]
         self.pickup_obj: RigidObject = self.scene["pickup_object"]
         self.cabinet: Articulation = self.scene["cabinet"]
-        self._handle_scaled = False  # Scale handle after first reset
+        # Scale handle visuals BEFORE physics init (avoid invalidating PhysX view)
+        self._scale_drawer_handle(scale_factor=3.0)
 
         # -- Load V6.2 locomotion policy --
         from ..low_level.policy_wrapper import LocomotionPolicy
@@ -738,11 +739,6 @@ class HierarchicalG1Env:
         # Store initial XY positions
         self._initial_pos = self.robot.data.root_pos_w[:, :2].clone()
 
-        # Scale drawer handle for visibility (once, after PhysX is initialized)
-        if not self._handle_scaled:
-            self._scale_drawer_handle(scale_factor=2.0)
-            self._handle_scaled = True
-
         return self.get_obs()
 
     def step(self, velocity_command: torch.Tensor) -> dict:
@@ -988,51 +984,48 @@ class HierarchicalG1Env:
             target_body = target_body.unsqueeze(0).expand(self.num_envs, -1)
         self._arm_target_body = target_body.clone()
 
-    def _scale_drawer_handle(self, scale_factor: float = 2.0):
+    def _scale_drawer_handle(self, scale_factor: float = 3.0):
         """Scale drawer handle visual mesh for better visibility."""
         try:
             import omni.usd
-            from pxr import UsdGeom, Gf
+            from pxr import UsdGeom, Gf, Sdf, Usd
             stage = omni.usd.get_context().get_stage()
-            cab = self.cabinet
-            scaled_names = []
-            for i, name in enumerate(cab.body_names):
-                if "handle" in name.lower():
-                    # Try multiple path patterns
-                    candidates = [
-                        f"/World/envs/env_0/Cabinet/{name}",
-                        f"/World/envs/env_0/Cabinet/{name}/visuals",
-                    ]
-                    prim = None
-                    prim_path = None
-                    for pp in candidates:
-                        p = stage.GetPrimAtPath(pp)
-                        if p.IsValid():
-                            prim = p
-                            prim_path = pp
-                            break
-                    if prim is None:
-                        # Traverse children to find handle
-                        cab_prim = stage.GetPrimAtPath("/World/envs/env_0/Cabinet")
-                        if cab_prim.IsValid():
-                            for child in cab_prim.GetAllChildren():
-                                if name in child.GetPath().pathString:
-                                    prim = child
-                                    prim_path = child.GetPath().pathString
-                                    break
-                    if prim.IsValid():
+            scaled_count = 0
+            # Traverse ALL prims under Cabinet to find handle meshes
+            cab_prim = stage.GetPrimAtPath("/World/envs/env_0/Cabinet")
+            if not cab_prim.IsValid():
+                print(f"  [HandleScale] Cabinet prim not found at /World/envs/env_0/Cabinet")
+                return
+            for prim in Usd.PrimRange(cab_prim):
+                path_str = prim.GetPath().pathString.lower()
+                # Only scale visual MESH prims under handle (not parent body or collisions)
+                if "handle" in path_str and "/visuals" in path_str:
+                    if prim.IsA(UsdGeom.Xformable):
                         xform = UsdGeom.Xformable(prim)
-                        # Don't clear existing xform ops — just add scale
-                        scale_op = xform.AddScaleOp(opSuffix="handleScale")
-                        scale_op.Set(Gf.Vec3f(scale_factor, scale_factor, scale_factor))
-                        scaled_names.append(name)
-                        print(f"  [HandleScale] Scaled '{name}' by {scale_factor}x")
-                    else:
-                        print(f"  [HandleScale] Prim not found: {prim_path}")
-            if not scaled_names:
-                print(f"  [HandleScale] No handle prim scaled (bodies: {list(cab.body_names)})")
+                        has_scale = False
+                        for op in xform.GetOrderedXformOps():
+                            if op.GetOpType() == UsdGeom.XformOp.TypeScale:
+                                existing = op.Get()
+                                op.Set(Gf.Vec3f(existing[0] * scale_factor, existing[1] * scale_factor, existing[2] * scale_factor))
+                                has_scale = True
+                                break
+                        if not has_scale:
+                            scale_op = xform.AddScaleOp(opSuffix="vis")
+                            scale_op.Set(Gf.Vec3f(scale_factor, scale_factor, scale_factor))
+                        scaled_count += 1
+                        print(f"  [HandleScale] Scaled: {prim.GetPath()} by {scale_factor}x")
+            if scaled_count == 0:
+                # Fallback: list all prims for debugging
+                all_names = []
+                for p in Usd.PrimRange(cab_prim):
+                    all_names.append(p.GetName())
+                print(f"  [HandleScale] No handle prims found. All prims: {all_names[:20]}")
+            else:
+                print(f"  [HandleScale] Scaled {scaled_count} handle prims by {scale_factor}x")
         except Exception as e:
-            print(f"  [HandleScale] Could not scale handle: {e}")
+            import traceback
+            print(f"  [HandleScale] Error: {e}")
+            traceback.print_exc()
 
     def _compute_palm_ee(self):
         """
@@ -1083,7 +1076,7 @@ class HierarchicalG1Env:
             print(f"  [MagneticGrasp] Object too far: {mean_dist:.3f}m (max: {max_dist:.2f}m)")
             return False
 
-    def attach_drawer_to_hand(self, max_dist: float = 0.90) -> bool:
+    def attach_drawer_to_hand(self, max_dist: float = 0.60) -> bool:
         """Rigid-attach EE to drawer handle (parent-child lock).
 
         When attached:
