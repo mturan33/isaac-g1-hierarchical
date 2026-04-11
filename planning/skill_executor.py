@@ -1878,11 +1878,13 @@ class SkillExecutor:
         saved_target = env._attached_target
         env._attached_target = "drawer_pull_direct"  # Prevents _update_attached_drawer
 
-        # Use heuristic arm control — FREEZE arm at current position
+        # Heuristic arm: freeze at current position with wrist horizontal
         env.enable_arm_policy(False)
-
-        # Lock arm at EXACTLY current position — no retraction, no dropping
         arm_targets = env.robot.data.joint_pos[:, env._arm_idx].clone()
+        # Set wrist horizontal (right arm indices 11=roll, 12=pitch, 13=yaw)
+        arm_targets[:, 11] = -1.57  # wrist_roll: palm inward
+        arm_targets[:, 12] = 0.0
+        arm_targets[:, 13] = 0.0
 
         # Record initial robot position
         initial_root_pos = env.robot.data.root_pos_w[:, :2].clone()
