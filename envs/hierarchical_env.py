@@ -466,7 +466,7 @@ class HierarchicalG1Env:
         self.pickup_obj: RigidObject = self.scene["pickup_object"]
         self.cabinet: Articulation = self.scene["cabinet"]
         # Scale handle visuals BEFORE physics init (avoid invalidating PhysX view)
-        self._scale_drawer_handle(scale_factor=3.0)
+        self._scale_drawer_handle(scale_factor=1.5)
 
         # -- Load V6.2 locomotion policy --
         from ..low_level.policy_wrapper import LocomotionPolicy
