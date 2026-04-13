@@ -1907,7 +1907,7 @@ class SkillExecutor:
         physx_view.set_dof_stiffnesses(zero_stiffness, stiff_indices)
         print(f"  [Pull] Disabled drawer PD (stiffness zeroed for joint {drawer_joint_idx})")
 
-        max_steps = 250
+        max_steps = 400
         opened_dist = 0.0
         env_indices = gpu_indices  # GPU device for position/velocity writes
 
@@ -1915,14 +1915,14 @@ class SkillExecutor:
             if not self._is_running():
                 break
 
-            # Backward walk command
+            # Backward walk command — aggressive
             backward_cmd = self._stand_cmd.clone()
-            if step < 10:
-                backward_cmd[:, 0] = -0.10
-            elif step < 30:
-                backward_cmd[:, 0] = -0.20
+            if step < 5:
+                backward_cmd[:, 0] = -0.15
+            elif step < 15:
+                backward_cmd[:, 0] = -0.30
             else:
-                backward_cmd[:, 0] = -0.35
+                backward_cmd[:, 0] = -0.50  # Max backward speed
 
             obs = env.step_manipulation(backward_cmd, arm_targets)
 
