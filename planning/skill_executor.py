@@ -1014,9 +1014,12 @@ class SkillExecutor:
                 print(f"  [PreReach] Step {step:3d} | h={h:.2f} | stand={standing}/{env.num_envs} | "
                       f"EE=[{ee_now[0,0]:.2f},{ee_now[0,1]:.2f},{ee_now[0,2]:.2f}]")
 
-        # FREEZE arm at raised position (wrist stays default for arm policy compatibility)
+        # FREEZE arm at raised position + wrist horizontal
         env.enable_arm_policy(False)
         self._hold_arm_targets = env.robot.data.joint_pos[:, env._arm_idx].clone()
+        self._hold_arm_targets[:, 11] = -1.57  # wrist_roll horizontal
+        self._hold_arm_targets[:, 12] = 0.0
+        self._hold_arm_targets[:, 13] = 0.0
 
         ee_final, _ = env._compute_palm_ee()
         print(f"  [PreReach] Final EE: [{ee_final[0,0]:.3f}, {ee_final[0,1]:.3f}, {ee_final[0,2]:.3f}]")
@@ -1107,8 +1110,8 @@ class SkillExecutor:
                     h = obs["base_height"].mean().item()
                     print(f"  [Reach] Step {step:3d} | h={h:.2f} | EE->handle={ee_to_handle:.3f}m")
 
-                if ee_to_handle < 0.30:
-                    attached = env.attach_drawer_to_hand(max_dist=0.35)
+                if ee_to_handle < 0.57:
+                    attached = env.attach_drawer_to_hand(max_dist=0.60)
                     if attached:
                         print(f"  [Reach] ** Drawer handle LOCKED at step {step}! dist={ee_to_handle:.3f}m **")
                         self._hold_arm_targets = env.robot.data.joint_pos[:, env._arm_idx].clone()
@@ -1116,7 +1119,7 @@ class SkillExecutor:
 
             # Fallback: attach at whatever distance arm reached
             if not attached:
-                attached = env.attach_drawer_to_hand(max_dist=1.0)
+                attached = env.attach_drawer_to_hand(max_dist=0.70)
                 if attached:
                     print(f"  [Reach] Handle locked (fallback, dist={ee_to_handle:.3f}m)")
 
@@ -1397,7 +1400,7 @@ class SkillExecutor:
         if not already_attached:
             is_drawer = self._last_reach_target and "drawer" in self._last_reach_target
             if is_drawer:
-                attached = env.attach_drawer_to_hand(max_dist=0.35)
+                attached = env.attach_drawer_to_hand(max_dist=0.60)
             else:
                 attached = env.attach_object_to_hand(max_dist=0.27)
         else:
