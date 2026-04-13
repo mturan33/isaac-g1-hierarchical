@@ -1116,7 +1116,7 @@ class SkillExecutor:
 
             # Fallback: attach at whatever distance arm reached
             if not attached:
-                attached = env.attach_drawer_to_hand(max_dist=0.70)
+                attached = env.attach_drawer_to_hand(max_dist=1.0)
                 if attached:
                     print(f"  [Reach] Handle locked (fallback, dist={ee_to_handle:.3f}m)")
 
