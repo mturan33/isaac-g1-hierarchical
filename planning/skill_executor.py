@@ -986,15 +986,17 @@ class SkillExecutor:
         root_pos = env.robot.data.root_pos_w
         root_quat = env.robot.data.root_quat_w
 
-        # Fixed HIGH position in body frame — well above table height
+        # Body frame target — lower for drawer (handle is at pelvis height)
+        is_drawer_target = target and "drawer" in target
+        pre_z = 0.10 if is_drawer_target else 0.20
         pre_target_body = torch.tensor(
-            [[0.25, -0.10, 0.20]], dtype=torch.float32, device=self.device,
+            [[0.25, -0.10, pre_z]], dtype=torch.float32, device=self.device,
         ).expand(env.num_envs, -1)
 
         # Convert to world frame
         pre_target_world = quat_apply(root_quat, pre_target_body) + root_pos
 
-        print(f"  [PreReach] Raising arm to HIGH position (body [0.25, -0.10, 0.20])")
+        print(f"  [PreReach] Raising arm to {'MID' if is_drawer_target else 'HIGH'} position (body [0.25, -0.10, {pre_z}])")
         print(f"  [PreReach] Target world: [{pre_target_world[0,0]:.3f}, {pre_target_world[0,1]:.3f}, {pre_target_world[0,2]:.3f}]")
 
         # Set target and run arm policy
