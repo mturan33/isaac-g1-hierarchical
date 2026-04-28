@@ -13,17 +13,23 @@ Supports two task types:
 
 ## Key Results
 
-| Task | Steps | Success | Time |
-|------|-------|---------|------|
-| Pick-and-place (VLM) | 8/8 | 100% | ~80s |
-| Drawer opening (VLM) | 6/6 | 100% | ~50s |
-| Pick-and-place (rule) | 8/8 | 100% | ~35s |
-| Drawer opening (rule) | 6/6 | 100% | ~30s |
+Validated on Apr 2026 with the policies shipped in `checkpoints/`
+(Stage 2 Loco + Stage 2 Arm trained on RTX 5070 Ti Laptop, 64 GB DDR5):
 
-- **Zero falls** during full trajectories
-- **VLM closed-loop**: Background replanning every ~10s
+| Task | Setup | walk_to success | Standing | Notes |
+|------|-------|-----------------|----------|-------|
+| Pick-and-place (rule) | 1 env GUI | 1/1 | 8/8 | full pre_reach + walk_to + reach pipeline |
+| Pick-and-place (rule) | 8 envs headless | **4/7 (majority)** | 7/8 | per-env vectorized PP, 1 fall |
+| Drawer opening (rule) | 1 env GUI | not re-measured | — | (planner unchanged from earlier release) |
+
+- **Zero falls** in 1-env runs; 7/8 standing in 8-env headless runs
+- **VLM closed-loop**: Background replanning every ~10s (planner unchanged)
 - Lateral carry with heading-hold Pure Pursuit controller
 - Physical drawer pull via arm retraction + backward walk
+
+> **walk_to success rate**: 4/7+ in headless multi-env, 1/1 reliable in single-env
+> GUI demo. Subsequent skills (`reach` / `grasp`) are scripted state machines and
+> are being replaced with a learned VLA policy in a separate repo.
 
 ## Architecture
 

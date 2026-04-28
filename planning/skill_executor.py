@@ -84,8 +84,8 @@ class PurePursuitController:
 
         # Turn-in-place modes:
         #   1) Target behind robot (dx_body < 0)
-        #   2) FIX: Close (<0.9m) AND misaligned (>23°) — prevents orbiting at min turning radius
-        if dx_body < 0.05 or (dist < 0.9 and abs(heading_err) > 0.4):
+        #   2) FIX: Close (<2.0m) AND misaligned (>17°) — earlier rotation, prevents orbiting
+        if dx_body < 0.05 or (dist < 2.0 and abs(heading_err) > 0.3):
             vyaw_sign = 1.0 if dy_body > 0 else -1.0
             vyaw = self.max_vyaw * vyaw_sign
             return 0.0, 0.0, max(-self.max_vyaw, min(self.max_vyaw, vyaw))
@@ -136,8 +136,8 @@ class PurePursuitController:
         L = torch.clamp(dist, min=0.05)
         L = torch.clamp(L, max=self.L)
 
-        # Turn-in-place mask: target behind OR (close <0.9m AND misaligned >23°)
-        turn_in_place_mask = (dx_body < 0.05) | ((dist < 0.9) & (heading_err.abs() > 0.4))
+        # Turn-in-place mask: target behind OR (close <2.0m AND misaligned >17°)
+        turn_in_place_mask = (dx_body < 0.05) | ((dist < 2.0) & (heading_err.abs() > 0.3))
 
         vyaw_sign = torch.where(dy_body > 0, torch.ones_like(dy_body), -torch.ones_like(dy_body))
         vyaw_turn = torch.clamp(self.max_vyaw * vyaw_sign, min=-self.max_vyaw, max=self.max_vyaw)
@@ -661,11 +661,11 @@ class SkillExecutor:
                 lateral_correction=0.25,
             )
         else:
-            # FIX v2: vyaw 0.45 → 0.60 (was 0.80 — caused falls; was 0.45 — caused orbit)
-            # vx 0.60 → 0.45 (slower, stable). Min turning radius 0.45/0.60 = 0.75 m.
+            # FIX v3: vyaw 0.60 → 0.65 (radius 0.69m, lower fall risk than 0.80)
+            # Combined with earlier turn-in-place trigger (2.0m + 0.3 rad)
             pp_normal = PurePursuitController(
                 lookahead_distance=0.4, max_vx=0.45, max_vy=0.30,
-                max_vyaw=0.60, decel_radius=0.6, min_speed=0.08,
+                max_vyaw=0.65, decel_radius=0.6, min_speed=0.08,
                 lateral_correction=0.25,
             )
 
