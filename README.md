@@ -66,7 +66,7 @@ Validated on Apr 2026 with the policies shipped in `checkpoints/`
 
 | Component | Version |
 |-----------|---------|
-| OS | Windows 11 |
+| OS | Windows 11 (developed and tested); Linux via `isaaclab.sh`, not tested by the author |
 | GPU | NVIDIA RTX (Blackwell: use driver 591.74) |
 | Python | 3.11 |
 | Isaac Sim | 5.1.0 |
@@ -159,14 +159,20 @@ directory it searched, rather than a USD load error deeper in the stack.
 
 ### Pre-trained Checkpoints
 
-Pre-trained policies (trained on this same hardware/config) are shipped under `checkpoints/`:
+Pre-trained policies are shipped under `checkpoints/`. Both were trained with the
+companion repository [isaac-g1-ulc](https://github.com/mturan33/isaac-g1-ulc), and each
+file is byte-identical to the checkpoint written by the run named below.
 
-| File | Stage | Size |
-|------|-------|------|
-| `checkpoints/loco_stage2.pt` | Stage 2 Loco (perturbation-robust) | 5.1 MB |
-| `checkpoints/arm_stage2.pt` | Stage 2 Arm (3 cm reach accuracy) | 4.1 MB |
+| File | Policy | Trained with ([isaac-g1-ulc](https://github.com/mturan33/isaac-g1-ulc)) | Source run | Size |
+|------|--------|--------------|------------|------|
+| `checkpoints/loco_stage2.pt` | Stage 2 Loco (perturbation-robust), 66 obs → 15 act | `g1/isaac_g1_ulc/train/29dof/train_unified_stage_2_loco.py` | `g1_stage2_loco_2026-04-25_20-44-09/model_best.pt` | 5.1 MB |
+| `checkpoints/arm_stage2.pt` | Stage 2 Arm (3 cm reach accuracy), 39 obs → 7 act | `g1/isaac_g1_ulc/train/29dof/train_unified_stage_2_arm.py` | `g1_stage2_arm_2026-04-22_00-35-56/model_final.pt` | 4.1 MB |
 
 No training required — clone and run demos directly.
+
+> `scripts/train_loco.sh` and `scripts/play_loco.sh` train and play the stock
+> `unitree_rl_lab` velocity policy (`Unitree-G1-29dof-Velocity`). That is a separate
+> baseline and **not** how `loco_stage2.pt` was produced.
 
 ### Run Demos
 
@@ -213,6 +219,24 @@ All commands from `C:\IsaacLab`:
 # Add --record for video capture
 ```
 
+On **Linux**, the same demos run through `isaaclab.sh`, with forward slashes and `\`
+line continuations. This path is not tested by the author; please open an issue if
+something breaks.
+
+```bash
+cd ~/IsaacLab   # your Isaac Lab checkout
+P=source/isaaclab_tasks/isaaclab_tasks/direct/high_low_hierarchical_g1
+
+./isaaclab.sh -p $P/scripts/demo_vlm_planning.py \
+    --num_envs 1 \
+    --checkpoint $P/checkpoints/loco_stage2.pt \
+    --arm_checkpoint $P/checkpoints/arm_stage2.pt \
+    --task "Pick up the steering wheel from the table" \
+    --planner simple
+```
+
+The other demos take the same flags as their Windows versions above.
+
 ### Command-Line Options
 
 | Flag | Description |
@@ -224,6 +248,20 @@ All commands from `C:\IsaacLab`:
 | `--headless` | No GUI (faster, for testing) |
 | `--record` | Record video frames |
 | `--num_envs N` | Number of parallel environments |
+
+## Repository Layout
+
+| Path | Status | Contents |
+|------|--------|----------|
+| `envs/` | active | Isaac Lab scene and environment (`hierarchical_env.py`) |
+| `low_level/` | active | Locomotion, arm and finger policy wrappers and controllers |
+| `skills/` | active | Skill primitives: walk_to, turn_to, stand_still, squat, heuristic grasp/place |
+| `planning/` | active | VLM planner (Ollama), semantic map and skill executor used by the demos |
+| `config/` | active | Joint and skill configuration |
+| `checkpoints/` | active | Shipped policies (see [Pre-trained Checkpoints](#pre-trained-checkpoints)) |
+| `scripts/` | active | Demos and tests; `train_loco.sh` / `play_loco.sh` are the `unitree_rl_lab` baseline |
+| `scripts/dev/` | developer | Diagnostics kept for reference; they default to the shipped checkpoints |
+| `legacy/planner/` | legacy | Earlier text-only LLM planner (Anthropic / OpenAI APIs), superseded by `planning/`; used only by `scripts/test_skills.py` |
 
 ## Skill Library
 
@@ -286,7 +324,7 @@ Lateral mode uses heading-hold P-controller (Kp=2.5) to maintain orientation.
 
 ## Scene
 
-- **Robot**: Unitree G1 29-DoF (12 leg + 3 waist + 7 arm + 7 finger)
+- **Robot**: Unitree G1 29-DoF body (12 leg + 3 waist + 14 arm) with Dex3 hands (14 finger joints), 43 joints in total
 - **Table**: PackingTable with basket
 - **Object**: Steering wheel (scaled 0.75x)
 - **Cabinet**: Sektion cabinet with prismatic drawer joints (scaled 1.3x)
@@ -316,8 +354,8 @@ VLM runs are auto-scored (0-10) and saved to `results/vlm_runs/`:
 
 ## References
 
-- Ahn et al. 2022 -- SayCan: VLM + affordance scoring
-- Ouyang et al. 2024 -- Berkeley Loco-Manipulation
-- Gu et al. 2025 (RSS) -- HOMIE: height-coupled knee reward
-- Coulter 1992 -- Pure Pursuit path tracking
-- unitree_rl_lab -- G1 29-DoF locomotion framework
+- M. Ahn et al., "Do As I Can, Not As I Say: Grounding Language in Robotic Affordances" (SayCan), 2022 -- LLM + affordance scoring. [arXiv:2204.01691](https://arxiv.org/abs/2204.01691)
+- Y. Ouyang et al., "Long-horizon Locomotion and Manipulation on a Quadrupedal Robot with Large Language Models", 2024 -- LLM task decomposition for loco-manipulation. [arXiv:2404.05291](https://arxiv.org/abs/2404.05291)
+- Q. Ben et al., "HOMIE: Humanoid Loco-Manipulation with Isomorphic Exoskeleton Cockpit", RSS 2025 -- height-tracking reward. [arXiv:2502.13013](https://arxiv.org/abs/2502.13013)
+- R. C. Coulter, "Implementation of the Pure Pursuit Path Tracking Algorithm", CMU-RI-TR-92-01, 1992 -- Pure Pursuit path tracking.
+- [unitree_rl_lab](https://github.com/unitreerobotics/unitree_rl_lab) -- G1 29-DoF locomotion framework

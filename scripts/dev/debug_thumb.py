@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
-"""
+r"""
 Quick diagnostic: dump DEX3 thumb joint limits and test close directions.
 Run from C:\IsaacLab:
-  .\isaaclab.bat -p source\isaaclab_tasks\isaaclab_tasks\direct\high_low_hierarchical_g1\scripts\debug_thumb.py --headless
+  .\isaaclab.bat -p source\isaaclab_tasks\isaaclab_tasks\direct\high_low_hierarchical_g1\scripts\dev\debug_thumb.py --headless
 """
 import argparse
 from isaaclab.app import AppLauncher
@@ -18,7 +18,7 @@ sys.stdout.reconfigure(line_buffering=True)
 
 import isaaclab.sim as sim_utils
 
-_PKG_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+_PKG_DIR = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 _PKG_PARENT = os.path.dirname(_PKG_DIR)
 if _PKG_PARENT not in sys.path:
     sys.path.insert(0, _PKG_PARENT)
@@ -35,8 +35,8 @@ sim_cfg = sim_utils.SimulationCfg(
 sim = sim_utils.SimulationContext(sim_cfg)
 
 # Dummy loco checkpoint (we just need scene setup, not actual policy)
-# Use the real checkpoint path
-LOCO_CKPT = r"C:\IsaacLab\logs\ulc\g1_unified_stage1_2026-02-27_00-05-20\model_best.pt"
+# Shipped Stage 2 locomotion checkpoint
+LOCO_CKPT = os.path.join(_PKG_DIR, "checkpoints", "loco_stage2.pt")
 
 scene_cfg = HierarchicalSceneCfg()
 env = HierarchicalG1Env(

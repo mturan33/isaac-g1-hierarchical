@@ -1,1 +1,1 @@
-"""Hierarchical LLM+RL control for G1 humanoid."""
+"""Hierarchical VLM+RL control for the Unitree G1 humanoid."""

@@ -1,7 +1,15 @@
-"""Check Stage 7 checkpoint structure."""
+"""Print the structure of a checkpoint.
+
+Usage: python scripts/dev/check_ckpt.py [checkpoint.pt]
+Defaults to the shipped checkpoints/loco_stage2.pt.
+"""
+import os
+import sys
+
 import torch
 
-ckpt_path = r"C:\IsaacLab\logs\ulc\ulc_g1_stage7_antigaming_2026-02-06_17-41-47\model_best.pt"
+ckpt_path = sys.argv[1] if len(sys.argv) > 1 else os.path.join(
+    os.path.dirname(__file__), "..", "..", "checkpoints", "loco_stage2.pt")
 ckpt = torch.load(ckpt_path, map_location="cpu", weights_only=False)
 
 print("Top-level keys:", list(ckpt.keys()))
