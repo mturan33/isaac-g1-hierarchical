@@ -1,0 +1,23 @@
+cff-version: 1.2.0
+message: "If you use this software, please cite it as below."
+title: "Hierarchical VLM-RL Pick-and-Place and Drawer Opening for the Unitree G1 Humanoid"
+abstract: >-
+  A vision-language model (Qwen3-VL) decomposes natural-language tasks into skill
+  primitives that a cascade of reinforcement-learning policies (locomotion, arm,
+  finger) executes on the Unitree G1 in NVIDIA Isaac Lab. Supports pick-and-place
+  and drawer opening.
+type: software
+authors:
+  - family-names: "Yardımcı"
+    given-names: "Mehmet Turan"
+    orcid: "https://orcid.org/0009-0004-8416-8368"
+repository-code: "https://github.com/mturan33/isaac-g1-hierarchical"
+license: MIT
+keywords:
+  - humanoid-robotics
+  - loco-manipulation
+  - vision-language-model
+  - hierarchical-control
+  - reinforcement-learning
+  - isaac-lab
+  - unitree-g1

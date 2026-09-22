@@ -29,8 +29,9 @@ sys.path.insert(0, PROJECT_ROOT)
 def parse_args():
     parser = argparse.ArgumentParser(description="Test G1 Skill Primitives")
 
-    parser.add_argument("--checkpoint", type=str, required=True,
-                        help="Path to trained locomotion policy checkpoint")
+    parser.add_argument("--checkpoint", type=str, default=None,
+                        help="Locomotion checkpoint for simulation tests (not implemented yet; "
+                             "the offline tests below do not need one)")
     parser.add_argument("--skill", type=str, default="walk_to",
                         choices=["walk_to", "turn_to", "stand_still", "all"],
                         help="Skill to test")
@@ -57,11 +58,13 @@ def test_offline():
     Uses mock observation data.
     """
     import torch
-    from config.joint_config import NUM_ALL_JOINTS
-    from skills.base_skill import SkillStatus
-    from skills.walk_to import WalkToSkill
-    from skills.turn_to import TurnToSkill
-    from skills.stand_still import StandStillSkill
+    # skills/ uses package-relative imports (..low_level), so import through the package.
+    sys.path.insert(0, os.path.dirname(PROJECT_ROOT))
+    from high_low_hierarchical_g1.config.joint_config import NUM_ALL_JOINTS
+    from high_low_hierarchical_g1.skills.base_skill import SkillStatus
+    from high_low_hierarchical_g1.skills.walk_to import WalkToSkill
+    from high_low_hierarchical_g1.skills.turn_to import TurnToSkill
+    from high_low_hierarchical_g1.skills.stand_still import StandStillSkill
 
     device = "cpu"  # No GPU needed for structure test
     print("\n" + "=" * 60)
@@ -128,8 +131,11 @@ def test_offline():
 
 def test_planner_offline():
     """Test LLM planner in offline mode (no API key needed)."""
-    from planner.semantic_map import SemanticMap
-    from planner.llm_planner import LLMPlanner
+    # The legacy planner lives inside the package and uses package-relative imports,
+    # so it is imported by its package path with the package parent on sys.path.
+    sys.path.insert(0, os.path.dirname(PROJECT_ROOT))
+    from high_low_hierarchical_g1.legacy.planner.semantic_map import SemanticMap
+    from high_low_hierarchical_g1.legacy.planner.llm_planner import LLMPlanner
 
     print("\n" + "=" * 60)
     print("  Offline Planner Test")
@@ -177,9 +183,8 @@ def main():
         print(f"  Run with: isaaclab.bat -p test_skills.py --checkpoint <path>")
         # TODO: Implement simulation-based testing
     else:
-        print(f"\n  Checkpoint not found: {args.checkpoint}")
-        print(f"  Skipping simulation tests.")
-        print(f"  Train a policy first with: scripts/train_loco.sh")
+        print("\n  No checkpoint given (or not found); skipping simulation tests.")
+        print("  Shipped policies are in checkpoints/ -- see the README.")
 
 
 if __name__ == "__main__":

@@ -18,14 +18,14 @@ from typing import Optional
 
 from .semantic_map import SemanticMap
 from .llm_planner import LLMPlanner, SkillStep
-from ..skills.base_skill import BaseSkill, SkillResult, SkillStatus
-from ..skills.walk_to import WalkToSkill
-from ..skills.turn_to import TurnToSkill
-from ..skills.stand_still import StandStillSkill
-from ..skills.squat import SquatSkill
-from ..skills.heuristic_manipulation import HeuristicGraspSkill, HeuristicPlaceSkill
-from ..low_level.policy_wrapper import LocomotionPolicy
-from ..config.skill_config import SkillLibraryConfig, DEFAULT_SKILL_CONFIG
+from ...skills.base_skill import BaseSkill, SkillResult, SkillStatus
+from ...skills.walk_to import WalkToSkill
+from ...skills.turn_to import TurnToSkill
+from ...skills.stand_still import StandStillSkill
+from ...skills.squat import SquatSkill
+from ...skills.heuristic_manipulation import HeuristicGraspSkill, HeuristicPlaceSkill
+from ...low_level.policy_wrapper import LocomotionPolicy
+from ...config.skill_config import SkillLibraryConfig, DEFAULT_SKILL_CONFIG
 
 
 class SkillExecutor:

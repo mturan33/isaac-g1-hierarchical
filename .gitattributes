@@ -1,2 +1,6 @@
 # Auto detect text files and perform LF normalization
 * text=auto
+
+# Model checkpoints are binary: never normalize line endings
+*.pt binary
+*.pth binary
